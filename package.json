@@ -13,6 +13,7 @@
   "description": "",
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",
+    "@types/string-similarity": "^4.0.2",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"
   },
@@ -21,6 +22,7 @@
     "cheerio": "^1.0.0",
     "dotenv": "^16.5.0",
     "js-yaml": "^4.1.0",
+    "string-similarity": "^4.0.4",
     "zod": "^3.25.36"
   }
 }

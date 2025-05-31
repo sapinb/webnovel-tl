@@ -1,5 +1,6 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
+import * as stringSimilarity from 'string-similarity';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -19,7 +20,11 @@ const chapterTitleSelector = '#neirong h1'; // Selector for the chapter title on
 const chapterContentSelector = '#txt';      // Selector for the chapter content on a chapter page
 // --- End Configuration ---
 
+// Threshold for string similarity (0.0 to 1.0). 0.8 means 80% similar.
+const SIMILARITY_THRESHOLD = 0.9;
+
 const extraTextToRemove = [
+    "搜书名找不到,可以试试搜作者哦,也许只是改名了!",
     "一秒记住【笔趣阁小说网】biquge345.com，更新快，无弹窗！",
     "本站采用Cookie技术来保存您的「阅读记录」和「书架」,所以清除浏览器Cookie数据丶重装浏览器之类的操作会让您的阅读进度消失哦,建议可以偶尔截图保存书架,以防找不到正在阅读的小说!",
 ]
@@ -120,13 +125,35 @@ async function scrapeChapterContent(url: string): Promise<{ title: string; conte
         .replace(/<p>/gi, '\n')
         .replace(/<\/p>/gi, '\n\n') // Add double newline for paragraph breaks
         .replace(/<[^>]+>/g, '');
+    
+    const lines = textContent.split('\n');
+    const filteredLines: string[] = [];
+    const trimmedPatternsToRemove = extraTextToRemove.map(p => p.trim()).filter(p => p.length > 0); // Trim patterns and remove empty ones
 
-    for (let text of extraTextToRemove) {
-        textContent = textContent.replace(text, '') 
+    for (const line of lines) {
+        const trimmedLine = line.trim();
+
+        if (!trimmedLine) { // Keep intentional paragraph breaks if they were made of multiple newlines initially
+                            // or discard if it was just whitespace. This matches previous filter(line=>line) behavior.
+            continue;
+        }
+
+        let isSimilarToPattern = false;
+        for (const pattern of trimmedPatternsToRemove) {
+            const similarity = stringSimilarity.compareTwoStrings(trimmedLine, pattern);
+            if (similarity >= SIMILARITY_THRESHOLD) {
+                isSimilarToPattern = true;
+                // console.log(`  SIMILARITY REMOVE: Line "${trimmedLine.substring(0, 70)}..." matched pattern "${pattern.substring(0, 70)}..." with similarity ${similarity.toFixed(2)}`);
+                break;
+            }
+        }
+
+        if (!isSimilarToPattern) {
+            filteredLines.push(trimmedLine);
+        }
     }
 
-    
-    textContent = textContent.split('\n').map(line => line.trim()).filter(line => line).join('\n').trim();
+    textContent = filteredLines.join('\n').trim(); // Join kept lines and final trim
 
     return { title: title, content: textContent };
 }
