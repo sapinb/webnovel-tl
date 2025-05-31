@@ -81,16 +81,16 @@ Key Guidelines:
 * Pacing: Short sentences for tension, longer ones for introspection.`
     ];
 
-//     if (glossary && glossary.trim() !== "") {
-//         systemPromptParts.push(`
-// Glossary:
-// Use the provided glossary to handle specific names, terms, and locations.
-// - Render proper names using the standardized Pinyin or specific English equivalent from the glossary.
-// - Do NOT literally translate names or terms that are defined in the glossary; use the glossary's version. For example, if the glossary states "龙傲天" is "Long Aotian", use "Long Aotian".
-// --- GLOSSARY START ---
-// ${glossary}
-// --- GLOSSARY END ---`);
-//     }
+    if (glossary && glossary.trim() !== "") {
+        systemPromptParts.push(`
+Glossary:
+Use the provided glossary to handle specific names, terms, and locations.
+- Render proper names using the standardized Pinyin or specific English equivalent from the glossary.
+- Do NOT literally translate names or terms that are defined in the glossary; use the glossary's version. For example, if the glossary states "龙傲天" is "Long Aotian", use "Long Aotian".
+--- GLOSSARY START ---
+${glossary}
+--- GLOSSARY END ---`);
+    }
 
     if (customInstructions && customInstructions.trim() !== "") {
         systemPromptParts.push(`
