@@ -7,6 +7,7 @@ export const SeriesConfigSchema = z.object({
   glossary: z.string().min(1, "Glossary cannot be empty.").optional(),
   customInstructions: z.string().min(1, "Custom instructions cannot be empty.").optional(),
   skipTranslation: z.boolean().default(false),
+  translateChapterMin: z.number().optional(),
 });
 
 // Schema for the entire series configurations object

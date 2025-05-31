@@ -254,6 +254,23 @@ async function main() {
             const outputFileName = file.replace('.txt', '.translated.txt');
             const outputPath = path.join(outputSeriesFolder, outputFileName);
 
+            // Check for translateMinChapter
+            const seriesConfig = seriesConfigurations[identifier];
+            const translateChapterMin = seriesConfig.translateChapterMin;
+
+            if (translateChapterMin !== undefined && translateChapterMin !== null) {
+                // Try to extract chapter number from filename, e.g., "0001 - Title.txt"
+                const match = file.match(/^(\d{4})\s*-/); // Matches "NNNN - "
+                if (match && match[1]) {
+                    const chapterNumberFromFile = parseInt(match[1], 10);
+                    if (!isNaN(chapterNumberFromFile) && chapterNumberFromFile < translateChapterMin) {
+                        console.log(`\n⏭️  Skipping chapter ${file} (Ch. ${chapterNumberFromFile}) for series '${identifier}'. It is below the configured minimum of ${translateChapterMin}.`);
+                        continue; // Skip this file
+                    }
+                }
+                // If the filename doesn't have a 4-digit prefix, it won't be skipped by this specific logic.
+            }
+
             try {
                 await fs.access(outputPath);
                 console.log(`✅ Skipping already translated: ${file} in ${identifier} (output file exists)`);
@@ -294,6 +311,7 @@ async function main() {
                     console.error(`❌ Could not even write error placeholder for ${outputPath}: ${writeError.message}`);
                 }
             }
+
             // console.log('⏳ Waiting 5 seconds before next file...\n');
             // await new Promise(res => setTimeout(res, 5000)); // Consider if this delay is still needed
         }
