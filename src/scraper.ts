@@ -87,8 +87,8 @@ function getChapterLinksOnPage(html: string, currentBaseUrl: string): ChapterInf
                 pageTitle: '', // Will be fetched from chapter page
                 linkText: originalLinkText,
                 url: absoluteUrl,
-                extractedChapterNumber: numStr,
-                filenameSafeTitle: cleanTitle || originalLinkText.replace(/[\\/:*?"<>|]/g, '').trim(), // Fallback if cleanTitle is empty
+                extractedChapterNumber: numStr, // numStr is like "0001" or null
+                filenameSafeTitle: cleanTitle, // cleanTitle is the sanitized title part, or sanitized originalLinkText if numStr is null
             });
         }
     });
@@ -158,6 +158,50 @@ async function scrapeChapterContent(url: string): Promise<{ title: string; conte
     return { title: title, content: textContent };
 }
 
+
+/**
+ * Generates a sanitized filename for a chapter.
+ * - If chapter number exists: "NNNN - Title Part.txt"
+ * - If no chapter number: "Full Link Text (Sanitized).txt"
+ * - Handles empty/invalid names with a fallback: "chapter-INDEX.txt" or "unknown-INDEX.txt"
+ */
+function generateChapterFilename(
+    chapterLinkText: string, // Original link text, for fallback name generation
+    extractedChapterNumber: string | null,
+    filenameSafeTitleFromInfo: string, // This is chapter.filenameSafeTitle (already sanitized by extractChapterNumber)
+    chapterIndexForFallback: number // Used if filenameSafeTitleFromInfo leads to an empty base name
+): string {
+    let baseFilenameCandidate: string;
+
+    if (extractedChapterNumber) {
+        // filenameSafeTitleFromInfo is the clean title part, already sanitized by extractChapterNumber
+        baseFilenameCandidate = `${extractedChapterNumber} - ${filenameSafeTitleFromInfo}`;
+    } else {
+        // filenameSafeTitleFromInfo is the sanitized full original text (or best effort title from extractChapterNumber)
+        baseFilenameCandidate = filenameSafeTitleFromInfo;
+    }
+
+    // Trim whitespace that might result from concatenation or if filenameSafeTitleFromInfo was empty/all-space.
+    // filenameSafeTitleFromInfo is already sanitized for invalid characters by extractChapterNumber.
+    let sanitizedBaseFilename = baseFilenameCandidate.trim();
+
+    const MAX_BASE_FILENAME_LENGTH = 200; // Max length for the base name part (before .txt)
+    if (sanitizedBaseFilename.length > MAX_BASE_FILENAME_LENGTH) {
+        sanitizedBaseFilename = sanitizedBaseFilename.substring(0, MAX_BASE_FILENAME_LENGTH);
+    }
+    
+    // If, after assembly, trimming, and truncation, the filename is empty
+    if (!sanitizedBaseFilename) {
+        let fallbackBase = chapterLinkText.replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, ' ').trim();
+        if (!fallbackBase) { // If sanitized original linkText is also empty
+            fallbackBase = `chapter-${String(chapterIndexForFallback).padStart(4, '0')}`;
+        }
+        sanitizedBaseFilename = fallbackBase.substring(0, MAX_BASE_FILENAME_LENGTH).trim(); // Ensure fallback also respects length and is trimmed
+        // Absolute last resort if even the fallback becomes empty (e.g. chapterLinkText was all invalid chars and fallbackBase was just `chapter-XXXX` but got mangled)
+        if (!sanitizedBaseFilename) sanitizedBaseFilename = `unknown-${String(chapterIndexForFallback).padStart(4, '0')}`; 
+    }
+    return `${sanitizedBaseFilename}.txt`;
+}
 /**
  * Saves the chapter content to a text file.
  */
@@ -173,21 +217,24 @@ function saveChapterToFile(
     }
 
     const displayTitle = chapterContent.title || chapter.filenameSafeTitle; // Prefer actual page title
-    
-    let filename: string;
-    if (chapter.extractedChapterNumber) {
-        filename = `${chapter.extractedChapterNumber} - ${chapter.filenameSafeTitle || displayTitle}.txt`;
-    } else {
-        // Fallback if chapter number extraction failed (as per requirement to not use index primarily)
-        // Using a padded index as a last resort for ordering if number extraction fails.
-        const fallbackNum = String(chapterIndexForFallback).padStart(4, '0');
-        filename = `${fallbackNum} - ${chapter.filenameSafeTitle || displayTitle}.txt`;
-        console.warn(`  WARN: Could not extract chapter number for "${chapter.linkText}". Using index-based filename: ${filename}`);
-    }
-    // Further sanitize filename to be sure
-    filename = filename.replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, ' ').trim();
-    if (filename.length > 200) filename = filename.substring(0, 200) + ".txt"; // Limit filename length
 
+    const filename = generateChapterFilename(
+        chapter.linkText,
+        chapter.extractedChapterNumber,
+        chapter.filenameSafeTitle,
+        chapterIndexForFallback
+    );
+
+    if (!chapter.extractedChapterNumber) {
+        const baseNameFromFilename = filename.slice(0, -4); // remove .txt
+        const fallbackPrefix = `chapter-${String(chapterIndexForFallback).padStart(4, '0')}`;
+        const unknownFallbackPrefix = `unknown-${String(chapterIndexForFallback).padStart(4, '0')}`;
+        if (baseNameFromFilename === fallbackPrefix || baseNameFromFilename === unknownFallbackPrefix) {
+             console.warn(`  WARN: Could not extract chapter number for "${chapter.linkText}" AND its text was invalid/empty. Using fallback filename: ${filename}`);
+        } else {
+             console.warn(`  WARN: Could not extract chapter number for "${chapter.linkText}". Using text-based filename: ${filename}`);
+        }
+    }
 
     const filePath = path.join(sourceOutputDir, filename);
 
@@ -242,18 +289,14 @@ async function processNovelSource(source_identifier: string, source: SingleSerie
         console.log(`\nProcessing Chapter ${i + 1}/${chapterInfos.length}: "${chapterInfo.linkText}"`);
         console.log(`  URL: ${chapterInfo.url}`);
 
-        // Construct tentative filename for existence check
-        let tentativeFilename: string;
-        const tentativeTitle = chapterInfo.filenameSafeTitle || chapterInfo.linkText.replace(/[\\/:*?"<>|]/g, '').trim();
-        if (chapterInfo.extractedChapterNumber) {
-            tentativeFilename = `${chapterInfo.extractedChapterNumber} - ${tentativeTitle}.txt`;
-        } else {
-            tentativeFilename = `${String(i + 1).padStart(4, '0')} - ${tentativeTitle}.txt`;
-        }
-        tentativeFilename = tentativeFilename.replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, ' ').trim();
-        if (tentativeFilename.length > 200) tentativeFilename = tentativeFilename.substring(0, 200) + ".txt";
-
-
+        // Construct tentative filename for existence check, must match saveChapterToFile logic
+        const tentativeFilename = generateChapterFilename(
+            chapterInfo.linkText,
+            chapterInfo.extractedChapterNumber,
+            chapterInfo.filenameSafeTitle,
+            i + 1 // chapterIndexForFallback
+        );
+        
         const tentativeFilePath = path.join(sourceOutputDir, tentativeFilename);
         if (fs.existsSync(tentativeFilePath)) {
             console.log(`  SKIPPED (already exists): ${tentativeFilename}`);
