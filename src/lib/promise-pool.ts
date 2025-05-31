@@ -3,7 +3,7 @@ type Task = () => Promise<any>; // Task now just returns a Promise, we don't car
 export class PromisePool {
     private concurrencyLimit: number;
     private runningTasks: Set<Promise<any>>;
-    private taskQueue: Array<Task>; // Queue stores functions that return Promises
+    private taskQueue: Array<Task>; // Queue stores Task functions directly
     private resolveDrain: (() => void) | null = null;
     private drainPromise: Promise<void> | null = null;
 
@@ -25,46 +25,46 @@ export class PromisePool {
      * @param task A function that returns a Promise.
      */
     public add(task: Task): void {
-        const wrappedTaskExecution = async () => {
-            try {
-                await task(); // Execute the actual task
-            } catch (error) {
-                // Log the error or handle it as appropriate for fire-and-forget tasks.
-                // Since 'add' doesn't return a promise, we must handle errors here.
-                console.error("Task in PromisePool failed:", error);
-            } finally {
-                // This is where the cleanup happens.
-                // We remove the promise that was just completed from `runningTasks`.
-                this.runningTasks.delete(promiseForWrappedTask);
-                this.processQueue(); // Check for new tasks to start
-            }
-        };
-
-        // This promise represents the execution of the wrappedTaskExecution.
-        // It's created immediately when add is called.
-        const promiseForWrappedTask = wrappedTaskExecution();
-
         if (this.runningTasks.size < this.concurrencyLimit) {
-            this.startTask(promiseForWrappedTask); // Pass the promise to start tracking
+            this.startTaskExecution(task);
         } else {
-            // If the pool is full, add a function to the queue
-            // This function, when called, will return the already-created promiseForWrappedTask.
-            this.taskQueue.push(() => promiseForWrappedTask);
+            // If the pool is full, add the task function itself to the queue.
+            // It will be executed later by processQueue.
+            this.taskQueue.push(task);
         }
     }
 
-    // `startTask` expects a Promise, not a function that returns a Promise.
-    private startTask(promise: Promise<any>): void {
-        this.runningTasks.add(promise);
-        // The promise has already been created/started. We just add it to the tracking set.
+    /**
+     * Executes a task, manages its lifecycle in the pool, and handles cleanup.
+     * The actual task function (which returns a Promise) is invoked here.
+     * @param task The task function to execute.
+     */
+    private startTaskExecution(task: Task): void {
+        // This promise variable will hold the promise returned by the executionWrapper.
+        // It's declared here so it can be referenced in the finally block of the wrapper.
+        let taskWrapperPromise: Promise<void>;
+
+        const executionWrapper = async () => {
+            try {
+                await task(); // Execute the actual task function
+            } catch (error) {
+                console.error("Task in PromisePool failed:", error);
+            } finally {
+                // Remove the wrapper promise from the set of running tasks.
+                this.runningTasks.delete(taskWrapperPromise);
+                this.processQueue(); // Attempt to process the next task in the queue.
+            }
+        };
+
+        taskWrapperPromise = executionWrapper(); // Invoke the wrapper, which in turn invokes the task.
+        this.runningTasks.add(taskWrapperPromise); // Add the wrapper's promise to the tracking set.
     }
 
     private processQueue(): void {
         while (this.runningTasks.size < this.concurrencyLimit && this.taskQueue.length > 0) {
-            const nextTaskFunction = this.taskQueue.shift();
-            if (nextTaskFunction) {
-                // Execute the function from the queue to get the promise, then start tracking it.
-                this.startTask(nextTaskFunction());
+            const nextTask = this.taskQueue.shift(); // Get the next Task function from the queue
+            if (nextTask) {
+                this.startTaskExecution(nextTask); // Execute it
             }
         }
 
