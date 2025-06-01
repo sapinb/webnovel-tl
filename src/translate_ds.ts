@@ -1,5 +1,6 @@
 import axios from 'axios';
 import * as fs from 'fs/promises';
+import { createWriteStream, WriteStream as NodeFsWriteStream } from 'fs';
 import * as path from 'path';
 import { Readable } from 'stream';
 import readline from 'readline';
@@ -8,8 +9,8 @@ import { PromisePool } from './lib/promise-pool';
 
 import type { SeriesConfigurations, SingleSeriesConfig } from './lib/schema';
 // DeepSeek API Configuration
-const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
-const DEEPSEEK_MODEL_NAME = 'deepseek-chat'; // Or any other specific model you want to use, e.g., 'deepseek-coder' for code-related tasks
+const DEEPSEEK_API_URL = process.env.DEEPSEEK_API_URL || 'https://api.deepseek.com/chat/completions';
+const DEEPSEEK_MODEL_NAME = process.env.DEEPSEEK_MODEL_NAME || 'deepseek-chat'; // Or any other specific model you want to use, e.g., 'deepseek-coder' for code-related tasks
 const API_KEY = process.env.APIKEY_DEEPSEEK;
 
 // Concurrency for translation tasks
@@ -21,6 +22,8 @@ const DRY_RUN_TRANSLATION = process.env.DRY_RUN_TRANSLATION === 'true';
 // Thresholds for output size warning
 const OUTPUT_SIZE_THRESHOLD_FACTOR = 0.2; // If output is less than 20% of input
 const MIN_INPUT_SIZE_FOR_WARNING = 100; // Bytes, for the input to be considered substantial enough for this warning
+// Temporary directory for live translation streams
+const TMP_DIR = path.resolve('tmp', 'live-translations');
 
 async function listTextFiles(dir: string): Promise<string[]> {
     try {
@@ -51,12 +54,14 @@ export async function translateChapterWithRetry(
     chineseText: string,
     glossary?: string,
     customInstructions?: string,
+    identifier?: string,
+    originalFilename?: string,
     maxAttempts = 3
 ): Promise<string> {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         console.log(`\n🈸 Attempt ${attempt} to translate chapter...`);
         try {
-            const result = await translateChapter(chineseText, glossary, customInstructions);
+            const result = await translateChapter(chineseText, glossary, customInstructions, identifier, originalFilename);
             console.log('✅ Chapter translated successfully.');
             return result;
         } catch (err: any) {
@@ -71,11 +76,16 @@ export async function translateChapterWithRetry(
 async function translateChapter(
     chineseText: string,
     glossary?: string,
-    customInstructions?: string
+    customInstructions?: string,
+    identifier?: string,
+    originalFilename?: string
 ): Promise<string> {
     if (!API_KEY) {
         throw new Error("APIKEY_DEEPSEEK environment variable is not set.");
     }
+
+    let tempFileStream: NodeFsWriteStream | null = null;
+    let tempFilePath: string | null = null;
 
     const systemPromptParts = [
 `Role & Objective:
@@ -132,6 +142,24 @@ Translate the following Chinese web novel chapter while adhering to the above st
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 480_000); // 8 minute timeout, slightly increased
 
+    if (!DRY_RUN_TRANSLATION && identifier && originalFilename) {
+        const safeOriginalFilename = originalFilename.replace(/\.txt$/i, '').replace(/[^a-zA-Z0-9_.-]/g, '_');
+        const tempFilename = `${Date.now()}_${identifier}_${safeOriginalFilename}_partial.txt`;
+        tempFilePath = path.join(TMP_DIR, tempFilename);
+        try {
+            // TMP_DIR should be created by initializeEnvironment
+            tempFileStream = createWriteStream(tempFilePath, { encoding: 'utf-8' });
+            console.log(`[${identifier}] 🔴 Live streaming translation to temporary file: ${tempFilePath}`);
+            tempFileStream.on('error', (err) => {
+                console.warn(`\n[${identifier}] ⚠️ Error on temporary file stream ${tempFilePath}: ${err.message}`);
+                tempFileStream = null;
+            });
+        } catch (e: any) {
+            console.warn(`[${identifier}] ⚠️ Could not create temporary file stream for ${tempFilename}: ${e.message}`);
+            tempFileStream = null;
+        }
+    }
+
     let finalOutput = '';
 
     try {
@@ -167,14 +195,19 @@ Translate the following Chinese web novel chapter while adhering to the above st
                 try {
                     const data = JSON.parse(jsonData);
                     const token = data.choices?.[0]?.delta?.content || '';
-                    finalOutput += token;
+                    if (token) {
+                        finalOutput += token;
+                        if (tempFileStream) {
+                            tempFileStream.write(token);
+                        }
+                    }
                 } catch (err: any) {
                     // It's possible to receive non-JSON data or metadata in the stream, log and ignore
                     console.warn('\n⚠️ Non-JSON line or parse error in stream:', line, err.message);
                 }
             } else {
                  // Log unexpected lines that are not part of the Server-Sent Events (SSE) format
-                 console.warn('\n⚠️ Unexpected line in stream:', line);
+                 console.warn('\n⚠️ Unexpected line in stream (expected "data: ...") :', line);
             }
         }
 
@@ -191,11 +224,21 @@ Translate the following Chinese web novel chapter while adhering to the above st
             }
             throw new Error(`API request failed: ${err.message}`);
         } else {
-            console.error(`\n❌ Error during translation: ${err.message}`);
-            throw err; // Re-throw other errors
+            console.error(`\n❌ Unexpected error during translation: ${err.message}`);
+            throw err;
         }
     } finally {
         clearTimeout(timeout);
+        if (tempFileStream) {
+            tempFileStream.end(() => {
+                if (tempFilePath) {
+                    // If an error was thrown by axios/timeout, finalOutput might be partial.
+                    // The temp file will reflect this. If no error, it's considered complete.
+                    // Empty files are no longer removed.
+                    console.log(`[${identifier}] ✅ Temporary live translation stream closed: ${tempFilePath}`);
+                }
+            });
+        }
     }
 
     if (finalOutput.trim() === '') {
@@ -218,7 +261,10 @@ async function initializeEnvironment(): Promise<void> {
     
     await fs.mkdir(TL_DIR, { recursive: true });
     console.log(`✅ Output directory ${TL_DIR} ensured.`);
-
+    if (!DRY_RUN_TRANSLATION) {
+        await fs.mkdir(TMP_DIR, { recursive: true });
+        console.log(`✅ Temporary live translation directory ${TMP_DIR} ensured.`);
+    }
 
     const seriesConfigurations = await getOrLoadSeriesConfig();
     const seriesIdentifiers = await fs.readdir(RAW_DL_DIR, { withFileTypes: true })
@@ -313,7 +359,7 @@ async function createTranslationTask(
 
     console.log(`[${identifier}] 🌐 Translating: ${file} using DeepSeek API...`);
     try {
-        const fullResponse = await translateChapterWithRetry(chineseText, glossary, customInstructions);
+        const fullResponse = await translateChapterWithRetry(chineseText, glossary, customInstructions, identifier, file);
         const trimmed = extractTranslation(fullResponse);
 
         if (!trimmed) {
@@ -335,7 +381,7 @@ async function createTranslationTask(
     } catch (error: any) {
         // If translateChapterWithRetry throws, all retries failed. Log the error. No placeholder file is saved.
         // This allows a future run to attempt translation again.
-        console.error(`[${identifier}] ❌ Failed to translate or save ${file} after multiple retries: ${error.message}. No file created.`);
+        console.error(`[${identifier}] ❌ Failed to translate or save ${file} after multiple retries: ${error.message}. A partial translation might exist in ${TMP_DIR}.`);
     }
 }
 
@@ -386,7 +432,6 @@ async function processSeries(
         // Filter if already translated
         try {
             await fs.access(outputPath);
-            // console.log(`[${identifier}] ✅ Skipping already translated: ${file} (output file exists)`);
             continue;
         } catch (error) {
             // File does not exist, proceed
