@@ -3,12 +3,16 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { Readable } from 'stream';
 import readline from 'readline';
-import { RAW_DL_DIR, getOrLoadSeriesConfig, TL_DIR, SERIES_CONFIG_FILE } from './lib/config'; // Assuming these are still needed
+import { RAW_DL_DIR, getOrLoadSeriesConfig, TL_DIR, SERIES_CONFIG_FILE } from './lib/config';
+import { PromisePool } from './lib/promise-pool';
 
 // DeepSeek API Configuration
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
 const DEEPSEEK_MODEL_NAME = 'deepseek-chat'; // Or any other specific model you want to use, e.g., 'deepseek-coder' for code-related tasks
 const API_KEY = process.env.APIKEY_DEEPSEEK;
+
+// Concurrency for translation tasks
+const TRANSLATION_CONCURRENCY = parseInt(process.env.TRANSLATION_CONCURRENCY || "3", 10);
 
 async function listTextFiles(dir: string): Promise<string[]> {
     try {
@@ -155,7 +159,7 @@ Translate the following Chinese web novel chapter while adhering to the above st
                 try {
                     const data = JSON.parse(jsonData);
                     const token = data.choices?.[0]?.delta?.content || '';
-                    process.stdout.write(token);
+                    // process.stdout.write(token); // Removed to prevent interleaved output
                     finalOutput += token;
                 } catch (err: any) {
                     // It's possible to receive non-JSON data or metadata in the stream, log and ignore
@@ -218,6 +222,9 @@ async function main() {
         return;
     }
 
+    const pool = new PromisePool(TRANSLATION_CONCURRENCY);
+    let totalFilesAddedToPool = 0;
+
     for (const identifier of seriesIdentifiers) {
         if (!seriesConfigurations[identifier]) {
             console.warn(`\n⏭️ Skipping series '${identifier}': No configuration found in '${SERIES_CONFIG_FILE}'.`);
@@ -249,6 +256,8 @@ async function main() {
             continue;
         }
 
+        let filesAddedToPoolForThisSeries = 0;
+
         for (const file of inputFiles) {
             const inputPath = path.join(inputSeriesFolder, file);
             const outputFileName = file.replace('.txt', '.translated.txt');
@@ -258,76 +267,85 @@ async function main() {
             if (translateChapterMin !== undefined || translateChapterMax !== undefined) {
                 // Try to extract chapter number from filename, e.g., "0001 - Title.txt"
                 const match = file.match(/^(\d{4})\s*-/); // Matches "NNNN - "
-                if (!match || !match[1]) {
-                    console.log(`\n⏭️  Skipping chapter ${file} for series '${identifier}'. Cannot parse chapter number, and chapter range (min/max) is specified.`);
-                    continue; // Skip this file if chapter number cannot be parsed and range is active
-                }
-
-                // At this point, match and match[1] are valid
+                if (match && match[1]) {
                     const chapterNumberFromFile = parseInt(match[1], 10);
-                if (!isNaN(chapterNumberFromFile)) { // This check is somewhat redundant now due to the above, but good for safety
+                    if (!isNaN(chapterNumberFromFile)) {
                         if (translateChapterMin !== undefined && chapterNumberFromFile < translateChapterMin) {
-                            console.log(`\n⏭️  Skipping chapter ${file} (Ch. ${chapterNumberFromFile}) for series '${identifier}'. It is below the configured minimum of ${translateChapterMin}.`);
+                            // console.log(`\n[${identifier}] ⏭️ Skipping chapter ${file} (Ch. ${chapterNumberFromFile}). Below min ${translateChapterMin}.`);
                             continue; // Skip this file
                         }
                         if (translateChapterMax !== undefined && chapterNumberFromFile > translateChapterMax) {
-                            console.log(`\n⏭️  Skipping chapter ${file} (Ch. ${chapterNumberFromFile}) for series '${identifier}'. It is above the configured maximum of ${translateChapterMax}.`);
+                            // console.log(`\n[${identifier}] ⏭️ Skipping chapter ${file} (Ch. ${chapterNumberFromFile}). Above max ${translateChapterMax}.`);
                             continue; // Skip this file
                         }
                     }
-                // No explicit 'else' needed here for !isNaN, as the earlier check for !match handles unparsable numbers.
-                // If parseInt results in NaN for some reason despite the regex, it would fall through,
-                // but the regex `\d{4}` should prevent that.
+                } else {
+                    console.log(`\n[${identifier}] ⏭️ Skipping chapter ${file}. Cannot parse chapter number for range check (min/max).`);
+                    continue; 
+                }
             }
 
             try {
                 await fs.access(outputPath);
-                console.log(`✅ Skipping already translated: ${file} in ${identifier} (output file exists)`);
+                // console.log(`[${identifier}] ✅ Skipping already translated: ${file} (output file exists)`);
                 continue;
             } catch (error) {
                 // File does not exist, proceed with translation
             }
 
-            console.log(`\n📖 Reading: ${file} from ${identifier}`);
-            const chineseText = await readFileContent(inputPath);
+            filesAddedToPoolForThisSeries++;
+            totalFilesAddedToPool++;
+            pool.add(async () => {
+                console.log(`[${identifier}] 📖 Reading: ${file}`);
+                const chineseText = await readFileContent(inputPath);
 
-            if (!chineseText.trim()) {
-                console.warn(`⚠️ Skipping empty file: ${file}`);
-                // await writeToFile(outputPath, ""); // Create an empty placeholder
-                continue;
-            }
-
-            console.log(`🌐 Translating: ${file} for series ${identifier} using DeepSeek API...`);
-            try {
-                const fullResponse = await translateChapterWithRetry(chineseText, glossary, customInstructions);
-                const trimmed = extractTranslation(fullResponse);
-
-                if (trimmed) {
-                    console.log(`\n\n📤 Translation finished. Saving output.`);
-                    await writeToFile(outputPath, trimmed);
-                    console.log(`💾 Saved to ${outputPath}`);
-                } else {
-                    console.warn(`\n\n⚠️ Translation for ${file} resulted in empty output after trimming. Saving placeholder.`);
-                    await writeToFile(outputPath, "");
+                if (!chineseText.trim()) {
+                    console.warn(`[${identifier}] ⚠️ Skipping empty file: ${file}. Creating empty placeholder.`);
+                    await writeToFile(outputPath, ""); 
+                    return;
                 }
 
-            } catch (error: any) {
-                console.error(`\n❌ Failed to translate ${file} for series ${identifier} after multiple retries: ${error.message}`);
-                // Optionally, write an error marker to the output file
+                console.log(`[${identifier}] 🌐 Translating: ${file} using DeepSeek API...`);
                 try {
-                    await writeToFile(outputPath, ``);
-                } catch (writeError: any) {
-                    console.error(`❌ Could not even write error placeholder for ${outputPath}: ${writeError.message}`);
-                }
-            }
+                    const fullResponse = await translateChapterWithRetry(chineseText, glossary, customInstructions);
+                    const trimmed = extractTranslation(fullResponse);
 
-            // console.log('⏳ Waiting 5 seconds before next file...\n');
-            // await new Promise(res => setTimeout(res, 5000)); // Consider if this delay is still needed
+                    if (trimmed) {
+                        // console.log(`[${identifier}] 📤 Translation for ${file} finished. Saving output.`);
+                        await writeToFile(outputPath, trimmed);
+                        console.log(`[${identifier}] 💾 Saved: ${outputPath}`);
+                    } else {
+                        console.warn(`[${identifier}] ⚠️ Translation for ${file} resulted in empty output after trimming. Saving placeholder.`);
+                        await writeToFile(outputPath, ""); // Save empty file as placeholder
+                        console.log(`[${identifier}] 💾 Saved placeholder (empty translation): ${outputPath}`);
+                    }
+
+                } catch (error: any) {
+                    console.error(`[${identifier}] ❌ Failed to translate ${file} after multiple retries: ${error.message}`);
+                    try {
+                        await writeToFile(outputPath, `Error: Translation failed for ${file}. ${error.message}`);
+                        console.log(`[${identifier}] 💾 Saved error placeholder: ${outputPath}`);
+                    } catch (writeError: any) {
+                        console.error(`[${identifier}] ❌ Could not write error placeholder for ${outputPath} after error: ${writeError.message}`);
+                    }
+                }
+            });
+        }
+        if (filesAddedToPoolForThisSeries > 0) {
+            console.log(`\n[${identifier}] Added ${filesAddedToPoolForThisSeries} chapters to the global translation pool.`);
+        } else {
+            console.log(`\n[${identifier}] No new chapters to translate in this series.`);
         }
         console.log(`--- Finished processing series: ${identifier} ---`);
     }
 
-    console.log(`\n✅ All series processed.`);
+    if (totalFilesAddedToPool > 0) {
+        console.log(`\n🌐 All series scanned. A total of ${totalFilesAddedToPool} chapters were added to the global translation pool. Waiting for all translations to complete...`);
+        await pool.drain();
+        console.log(`\n✅ All ${totalFilesAddedToPool} translations from the pool have completed.`);
+    } else {
+        console.log(`\n✅ All series scanned. No new chapters were found to translate across any series.`);
+    }
 }
 
 main().catch(err => {
