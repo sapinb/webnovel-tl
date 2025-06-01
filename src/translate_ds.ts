@@ -128,7 +128,7 @@ Translate the following Chinese web novel chapter while adhering to the above st
             messages: messages,
             temperature: 1.0, // Adjusted for potentially more creative literary translation
             top_p: 0.95,
-            max_tokens: 4000, // Adjust as needed, ensures output isn't excessively long / controls cost
+            max_tokens: 8192, // Adjust as needed, ensures output isn't excessively long / controls cost
             stream: true
         }, {
             headers: {
