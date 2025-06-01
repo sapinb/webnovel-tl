@@ -1,17 +1,21 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import * as stringSimilarity from 'string-similarity';
-import * as fs from 'fs';
+import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as iconv from 'iconv-lite';
 
 import {PromisePool} from './lib/promise-pool'
 import { extractChapterNumber } from './lib/number';
 import { getOrLoadSeriesConfig, RAW_DL_DIR } from './lib/config';
-import { SingleSeriesConfig } from './lib/schema';
+import type { SingleSeriesConfig } from './lib/schema';
 
 // Threshold for string similarity (0.0 to 1.0). 0.8 means 80% similar.
 const SIMILARITY_THRESHOLD = 0.9;
+const MAX_FILENAME_BASE_LENGTH = 200; // Max length for the base name part (before .txt)
+const REQUEST_DELAY_MS = 700; // Delay between chapter requests for the same source
+const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36';
+const AXIOS_REQUEST_TIMEOUT_MS = 30000; // 30 seconds for fetching HTML
 
 // --- Site-Specific Scraping Configuration ---
 interface SiteScrapingConfig {
@@ -70,19 +74,16 @@ async function getHtml(url: string, siteEncoding?: string): Promise<string | nul
         console.log(`Fetching: ${url}`);
         const response = await axios.get(url, {
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'User-Agent': DEFAULT_USER_AGENT,
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7' // More comprehensive Accept header
             },
             responseType: 'arraybuffer', // Crucial for getting raw bytes
-            // transformResponse: [data => data], // This is default behavior for arraybuffer and is fine
+            timeout: AXIOS_REQUEST_TIMEOUT_MS, // 30 seconds for fetching HTML
         });
 
-        // response.data will be an ArrayBuffer here
-        const buffer = Buffer.from(response.data); // Convert ArrayBuffer to Node.js Buffer
-
+        const buffer = Buffer.from(response.data);
         const encodingToUse = (siteEncoding || 'utf-8').toLowerCase();
-
         if (encodingToUse !== 'utf-8' && iconv.encodingExists(encodingToUse)) {
             console.log(`Decoding with: ${encodingToUse}`);
             return iconv.decode(buffer, encodingToUse);
@@ -90,11 +91,15 @@ async function getHtml(url: string, siteEncoding?: string): Promise<string | nul
             if (encodingToUse !== 'utf-8' && !iconv.encodingExists(encodingToUse)) {
                 console.warn(`Encoding '${encodingToUse}' not supported by iconv-lite. Falling back to UTF-8 decoding for ${url}.`);
             }
-            return buffer.toString('utf-8'); // Default to UTF-8
+            return buffer.toString('utf-8');
         }
     } catch (error: unknown) {
         if (axios.isAxiosError(error)) {
-            console.error(`Axios error fetching ${url}: ${error.message}`);
+            if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+                console.error(`Timeout error fetching ${url} after ${AXIOS_REQUEST_TIMEOUT_MS / 1000}s: ${error.message}`);
+            } else {
+                console.error(`Axios error fetching ${url}: ${error.message}`);
+            }
         } else if (error instanceof Error) {
             console.error(`Error fetching ${url}: ${error.message}`);
         } else {
@@ -111,7 +116,7 @@ function getChapterLinksOnPage(html: string, currentBaseUrl: string, chapterLink
     const $ = cheerio.load(html);
     const chapters: ChapterInfo[] = [];
 
-    $(chapterLinkSelector).each((_index, element) => { // Use the passed selector
+    $(chapterLinkSelector).each((_index, element) => {
         const linkElement = $(element);
         const originalLinkText = linkElement.text().trim();
         let relativeUrl = linkElement.attr('href');
@@ -149,8 +154,8 @@ async function scrapeChapterContent(
 
     const { chapterTitleSelector, chapterContentSelector, extraTextToRemove: siteExtraTextToRemove } = config;
 
-    const title = $(chapterTitleSelector).text().trim(); // Use passed selector
-    const contentHtml = $(chapterContentSelector) // Use passed selector
+    const title = $(chapterTitleSelector).text().trim();
+    const contentHtml = $(chapterContentSelector)
         .clone()
         .find('a, script, style, div[align="center"], .adsbygoogle') // More elements to remove
         .remove()
@@ -171,7 +176,7 @@ async function scrapeChapterContent(
     
     const lines = textContent.split('\n');
     const filteredLines: string[] = [];
-    const trimmedPatternsToRemove = siteExtraTextToRemove.map(p => p.trim()).filter(p => p.length > 0); // Use passed extraTextToRemove
+    const trimmedPatternsToRemove = siteExtraTextToRemove.map(p => p.trim()).filter(p => p.length > 0);
 
     for (const line of lines) {
         const trimmedLine = line.trim();
@@ -185,8 +190,7 @@ async function scrapeChapterContent(
         for (const pattern of trimmedPatternsToRemove) {
             const similarity = stringSimilarity.compareTwoStrings(trimmedLine, pattern);
             if (similarity >= SIMILARITY_THRESHOLD) {
-                isSimilarToPattern = true;
-                // console.log(`  SIMILARITY REMOVE: Line "${trimmedLine.substring(0, 70)}..." matched pattern "${pattern.substring(0, 70)}..." with similarity ${similarity.toFixed(2)}`);
+                isSimilarToPattern = true;                
                 break;
             }
         }
@@ -196,7 +200,7 @@ async function scrapeChapterContent(
         }
     }
 
-    textContent = filteredLines.join('\n').trim(); // Join kept lines and final trim
+    textContent = filteredLines.join('\n').trim();
 
     return { title: title, content: textContent };
 }
@@ -228,9 +232,8 @@ function generateChapterFilename(
     // filenameSafeTitleFromInfo is already sanitized for invalid characters by extractChapterNumber.
     let sanitizedBaseFilename = baseFilenameCandidate.trim();
 
-    const MAX_BASE_FILENAME_LENGTH = 200; // Max length for the base name part (before .txt)
-    if (sanitizedBaseFilename.length > MAX_BASE_FILENAME_LENGTH) {
-        sanitizedBaseFilename = sanitizedBaseFilename.substring(0, MAX_BASE_FILENAME_LENGTH);
+    if (sanitizedBaseFilename.length > MAX_FILENAME_BASE_LENGTH) {
+        sanitizedBaseFilename = sanitizedBaseFilename.substring(0, MAX_FILENAME_BASE_LENGTH);
     }
     
     // If, after assembly, trimming, and truncation, the filename is empty
@@ -239,7 +242,7 @@ function generateChapterFilename(
         if (!fallbackBase) { // If sanitized original linkText is also empty
             fallbackBase = `chapter-${String(chapterIndexForFallback).padStart(4, '0')}`;
         }
-        sanitizedBaseFilename = fallbackBase.substring(0, MAX_BASE_FILENAME_LENGTH).trim(); // Ensure fallback also respects length and is trimmed
+        sanitizedBaseFilename = fallbackBase.substring(0, MAX_FILENAME_BASE_LENGTH).trim(); // Ensure fallback also respects length and is trimmed
         // Absolute last resort if even the fallback becomes empty (e.g. chapterLinkText was all invalid chars and fallbackBase was just `chapter-XXXX` but got mangled)
         if (!sanitizedBaseFilename) sanitizedBaseFilename = `unknown-${String(chapterIndexForFallback).padStart(4, '0')}`; 
     }
@@ -248,16 +251,16 @@ function generateChapterFilename(
 /**
  * Saves the chapter content to a text file.
  */
-function saveChapterToFile(
+async function saveChapterToFile(
     chapter: ChapterInfo,
     chapterContent: { title: string; content: string },
     sourceIdentifier: string,
     chapterIndexForFallback: number
-): void {
+): Promise<void> {
     const sourceOutputDir = path.join(RAW_DL_DIR, sourceIdentifier);
-    if (!fs.existsSync(sourceOutputDir)) {
-        fs.mkdirSync(sourceOutputDir, { recursive: true });
-    }
+    // Directory creation is now handled in processNovelSource using async fs.mkdir
+    // or ensure it's created before calling this function if called from elsewhere.
+    // For this script's flow, processNovelSource handles it.
 
     const displayTitle = chapterContent.title || chapter.filenameSafeTitle; // Prefer actual page title
 
@@ -281,15 +284,16 @@ function saveChapterToFile(
 
     const filePath = path.join(sourceOutputDir, filename);
 
-    // Feature 1: Skip if file already exists
-    if (fs.existsSync(filePath)) {
-        console.log(`  SKIPPED (already exists): ${filename}`);
-        return;
-    }
+    // The primary "skip if exists" check is now done in `processNovelSource`
+    // before even attempting to scrape the chapter content.
+    // This function now assumes it should write the file.
+    // If this function could be called independently where `filePath` might exist,
+    // an fs.access check could be re-added here.
 
     try {
-        fs.writeFileSync(filePath, `${displayTitle}\n\n${chapterContent.content}`, 'utf-8');
+        await fs.writeFile(filePath, `${displayTitle}\n\n${chapterContent.content}`, 'utf-8');
         console.log(`  SAVED: ${filename}`);
+
     } catch (error: unknown) {
         if (error instanceof Error) {
             console.error(`  Error saving ${filename}: ${error.message}`);
@@ -317,7 +321,6 @@ async function processNovelSource(source_identifier: string, source: SingleSerie
         console.warn(`⚠️ No scraping configuration found for hostname: '${hostname}' (source: ${source_identifier}). Skipping this source.`);
         return;
     }
-    console.log(`Using specific config for hostname: ${hostname}`);
 
     const mainHtml = await getHtml(source.sourceUrl, currentScrapingConfig?.encoding);
     if (!mainHtml) {
@@ -333,11 +336,14 @@ async function processNovelSource(source_identifier: string, source: SingleSerie
     }
     
     const sourceOutputDir = path.join(RAW_DL_DIR, source_identifier);
-    if (!fs.existsSync(sourceOutputDir)) {
-        fs.mkdirSync(sourceOutputDir, { recursive: true });
+    try {
+        await fs.mkdir(sourceOutputDir, { recursive: true });
+    } catch (err: any) {
+        console.error(`Failed to create directory ${sourceOutputDir}: ${err.message}`);
+        return; // Cannot proceed without output directory
     }
 
-
+    let chaptersProcessedCount = 0;
     for (let i = 0; i < chapterInfos.length; i++) {
         const chapterInfo = chapterInfos[i];
         console.log(`\nProcessing Chapter ${i + 1}/${chapterInfos.length}: "${chapterInfo.linkText}"`);
@@ -352,35 +358,43 @@ async function processNovelSource(source_identifier: string, source: SingleSerie
         );
         
         const tentativeFilePath = path.join(sourceOutputDir, tentativeFilename);
-        if (fs.existsSync(tentativeFilePath)) {
+        try {
+            await fs.access(tentativeFilePath);
             console.log(`  SKIPPED (already exists): ${tentativeFilename}`);
-            continue;
+            continue; // File exists, skip to next chapter
+        } catch (error) {
+            // File does not exist, proceed to scrape
         }
+
 
         const chapterContent = await scrapeChapterContent(chapterInfo.url, {
             chapterTitleSelector: currentScrapingConfig.chapterTitleSelector,
             chapterContentSelector: currentScrapingConfig.chapterContentSelector,
             extraTextToRemove: currentScrapingConfig.extraTextToRemove,
-        }, currentScrapingConfig.encoding); // Pass encoding here
+        }, currentScrapingConfig.encoding);
         if (chapterContent) {
             chapterInfo.pageTitle = chapterContent.title; // Update with actual title from page
-            saveChapterToFile(chapterInfo, chapterContent, source_identifier, i + 1);
+            await saveChapterToFile(chapterInfo, chapterContent, source_identifier, i + 1);
+            chaptersProcessedCount++;
         } else {
             console.warn(`  Failed to scrape content for: ${chapterInfo.linkText}`);
         }
 
         // Add a small delay between requests to be polite to the server
-        await new Promise(resolve => setTimeout(resolve, 700)); // 0.7 second delay
+        if (i < chapterInfos.length - 1) { // No delay after the last chapter
+            await new Promise(resolve => setTimeout(resolve, REQUEST_DELAY_MS));
+        }
     }
+    console.log(`[${source_identifier}] Finished processing. ${chaptersProcessedCount} new chapters scraped.`);
 }
 
 /**
  * Main function to run the scraper for all configured sources.
  */
 async function main() {
-    if (!fs.existsSync(RAW_DL_DIR)) {
-        fs.mkdirSync(RAW_DL_DIR, { recursive: true });
-    }
+    // Ensure base raw download directory exists
+    await fs.mkdir(RAW_DL_DIR, { recursive: true });
+    console.log(`Raw download directory ensured: ${RAW_DL_DIR}`);
 
     // Load configurations at the start of main
     const seriesConfigurations = await getOrLoadSeriesConfig();
@@ -398,7 +412,6 @@ async function main() {
     console.log('\n--- Scraping Finished for All Sources! ---');
 }
 
-// Run the main function
 main().catch(err => {
     console.error("A critical error occurred in the main process:", err);
 });

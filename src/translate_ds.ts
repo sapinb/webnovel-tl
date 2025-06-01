@@ -24,13 +24,27 @@ const OUTPUT_SIZE_THRESHOLD_FACTOR = 0.2; // If output is less than 20% of input
 const MIN_INPUT_SIZE_FOR_WARNING = 100; // Bytes, for the input to be considered substantial enough for this warning
 // Temporary directory for live translation streams
 const TMP_DIR = path.resolve('tmp', 'live-translations');
+// Default API call parameters
+const DEEPSEEK_DEFAULT_TEMPERATURE = 1.0;
+const DEEPSEEK_MAX_TOKENS = 8192; // Max tokens for the completion
+// Timeouts and Retries
+const TRANSLATION_API_TIMEOUT_MS = 480_000; // 8 minutes
+const RETRY_BACKOFF_BASE_MS = 5000; // Base for exponential backoff
+const TRANSLATED_FILE_EXTENSION = '.translated.md';
+const TEMP_TRANSLATION_FILE_SUFFIX = '_partial.txt';
 
 async function listTextFiles(dir: string): Promise<string[]> {
     try {
         const files = await fs.readdir(dir);
         return files.filter(file => file.endsWith('.txt'));
     } catch (error: any) {
-        console.warn(`⚠️ Could not read directory ${dir}: ${error.message}. Skipping.`);
+        let message = 'Unknown error';
+        if (error instanceof Error) {
+            message = error.message;
+        } else if (typeof error === 'string') {
+            message = error;
+        }
+        console.warn(`⚠️ Could not read directory ${dir}: ${message}. Skipping.`);
         return [];
     }
 }
@@ -66,7 +80,7 @@ export async function translateChapterWithRetry(
             return result;
         } catch (err: any) {
             console.warn(`⚠️ Attempt ${attempt} failed: ${err.message}. Retrying...`);
-            await new Promise(res => setTimeout(res, 5000 * attempt)); // Increased backoff
+            await new Promise(res => setTimeout(res, RETRY_BACKOFF_BASE_MS * attempt)); // Exponential backoff
         }
     }
 
@@ -140,11 +154,11 @@ Translate the following Chinese web novel chapter while adhering to the above st
     ];
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 480_000); // 8 minute timeout, slightly increased
+    const timeout = setTimeout(() => controller.abort(), TRANSLATION_API_TIMEOUT_MS);
 
     if (!DRY_RUN_TRANSLATION && identifier && originalFilename) {
         const safeOriginalFilename = originalFilename.replace(/\.txt$/i, '').replace(/[^a-zA-Z0-9_.-]/g, '_');
-        const tempFilename = `${Date.now()}_${identifier}_${safeOriginalFilename}_partial.txt`;
+        const tempFilename = `${Date.now()}_${identifier}_${safeOriginalFilename}${TEMP_TRANSLATION_FILE_SUFFIX}`;
         tempFilePath = path.join(TMP_DIR, tempFilename);
         try {
             // TMP_DIR should be created by initializeEnvironment
@@ -166,9 +180,9 @@ Translate the following Chinese web novel chapter while adhering to the above st
         const response = await axios.post(DEEPSEEK_API_URL, {
             model: DEEPSEEK_MODEL_NAME,
             messages: messages,
-            temperature: 1.0, // Adjusted for potentially more creative literary translation
+            temperature: DEEPSEEK_DEFAULT_TEMPERATURE,
             top_p: 0.95,
-            max_tokens: 8192, // Adjust as needed, ensures output isn't excessively long / controls cost
+            max_tokens: DEEPSEEK_MAX_TOKENS,
             stream: true
         }, {
             headers: {
@@ -409,13 +423,14 @@ async function processSeries(
     let filesAddedToPoolForThisSeries = 0;
     for (const file of inputFiles) {
         const inputPath = path.join(inputFolder, file);
-        const outputFileName = file.replace('.txt', '.translated.md');
+        const outputFileName = file.replace(/\.txt$/i, TRANSLATED_FILE_EXTENSION);
         const outputPath = path.join(outputFolder, outputFileName);
 
         // Filter by chapter range
         if (translateChapterMin !== undefined || translateChapterMax !== undefined) {
+            // Expects filenames like "0001 - Chapter Title.txt" or "0001.txt"
             const match = file.match(/^(\d{4})\s*-/);
-            if (match && match[1]) {
+            if (match?.[1]) {
                 const chapterNumberFromFile = parseInt(match[1], 10);
                 if (!isNaN(chapterNumberFromFile)) {
                     if ((translateChapterMin !== undefined && chapterNumberFromFile < translateChapterMin) ||
@@ -424,7 +439,7 @@ async function processSeries(
                     }
                 }
             } else {
-                console.log(`\n[${identifier}] ⏭️ Skipping chapter ${file}. Cannot parse chapter number for range check (min/max).`);
+                console.log(`\n[${identifier}] ⏭️ Skipping chapter ${file}. Cannot parse chapter number for range check (min/max). Ensure filename starts with 'NNNN - ' or similar for range filtering to apply.`);
                 continue;
             }
         }
