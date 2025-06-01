@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "jest",
     "sync-raws": "ts-node src/scraper.ts",
     "sync-tl": "ts-node src/translate.ts"
   },
@@ -13,8 +13,11 @@
   "description": "",
   "devDependencies": {
     "@types/iconv-lite": "^0.0.1",
+    "@types/jest": "^29.5.14",
     "@types/js-yaml": "^4.0.9",
     "@types/string-similarity": "^4.0.2",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.3.4",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"
   },
