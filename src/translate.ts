@@ -17,7 +17,7 @@ import { PromisePool } from './lib/promise-pool';
 import type { SeriesConfigurations, SingleSeriesConfig } from './lib/schema';
 
 // Concurrency for translation tasks
-const TRANSLATION_CONCURRENCY = parseInt(process.env.TRANSLATION_CONCURRENCY || '2', 10); // Adjusted for local Ollama
+const TRANSLATION_CONCURRENCY = parseInt(process.env.TRANSLATION_CONCURRENCY || '1', 10); // Adjusted for local Ollama
 
 // Dry run mode: if true, no API calls or file writes will occur.
 const DRY_RUN_TRANSLATION = process.env.DRY_RUN_TRANSLATION === 'true';

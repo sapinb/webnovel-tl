@@ -93,7 +93,7 @@ Create a `.env` file in the project root with the following variables as needed:
 *   `DEEPSEEK_MODEL_NAME`: (Optional) Defaults to `deepseek-chat`.
 *   `BASE_URL`: (Optional, for Ollama) URL of your Ollama API. Defaults to `http://172.21.16.1:11434` (as defined in `src/lib/config.ts`).
 *   `MODEL_NAME`: (Optional, for Ollama) The Ollama model to use. Defaults to `hf.co/unsloth/gemma-3-27b-it-qat-GGUF:latest` (ensure this or your chosen model is pulled in Ollama).
-*   `TRANSLATION_CONCURRENCY`: (Optional) Number of concurrent translation tasks. Defaults to `3` for DeepSeek and `2` for Ollama.
+*   `TRANSLATION_CONCURRENCY`: (Optional) Number of concurrent translation tasks. Defaults to `3` for DeepSeek and `1` for Ollama.
 *   `DRY_RUN_TRANSLATION`: (Optional) Set to `true` to prevent actual API calls and file writes during translation.
 
 **Note:** A significant portion of the codebase was developed with the assistance of AI coding tools.
