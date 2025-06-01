@@ -5,7 +5,10 @@
   "scripts": {
     "test": "jest",
     "sync-raws": "ts-node src/scraper.ts",
-    "sync-tl": "ts-node src/translate.ts"
+    "sync-tl": "ts-node src/translate.ts",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"*.js\" \"*.json\""
   },
   "keywords": [],
   "author": "",
@@ -16,10 +19,17 @@
     "@types/jest": "^29.5.14",
     "@types/js-yaml": "^4.0.9",
     "@types/string-similarity": "^4.0.2",
+    "@typescript-eslint/eslint-plugin": "^8.33.0",
+    "@typescript-eslint/parser": "^8.33.0",
+    "eslint": "^9.28.0",
+    "eslint-config-prettier": "^10.1.5",
+    "eslint-plugin-prettier": "^5.4.1",
     "jest": "^29.7.0",
+    "prettier": "^3.5.3",
     "ts-jest": "^29.3.4",
     "ts-node": "^10.9.2",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.33.0"
   },
   "dependencies": {
     "axios": "^1.9.0",

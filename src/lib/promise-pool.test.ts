@@ -4,9 +4,9 @@ import { PromisePool } from './promise-pool';
 const createResolvingTask = (id: number | string, delay: number, onStart?: () => void, onEnd?: () => void) => {
   return jest.fn(async () => {
     if (onStart) onStart();
-    await new Promise(resolve => setTimeout(resolve, delay));
+    await new Promise((resolve) => setTimeout(resolve, delay));
     if (onEnd) onEnd();
-    return `Task ${id} completed`;
+    // return `Task ${id} completed`;
   });
 };
 
@@ -14,7 +14,7 @@ const createResolvingTask = (id: number | string, delay: number, onStart?: () =>
 const createRejectingTask = (id: number | string, delay: number, onStart?: () => void, onEnd?: () => void) => {
   return jest.fn(async () => {
     if (onStart) onStart();
-    await new Promise(resolve => setTimeout(resolve, delay));
+    await new Promise((resolve) => setTimeout(resolve, delay));
     if (onEnd) onEnd(); // onEnd might still be useful for tracking if it was attempted
     throw new Error(`Task ${id} failed`);
   });
@@ -36,11 +36,11 @@ describe('PromisePool', () => {
 
   describe('constructor', () => {
     it('should throw an error if concurrency limit is zero', () => {
-      expect(() => new PromisePool(0)).toThrow("Concurrency limit must be a positive number.");
+      expect(() => new PromisePool(0)).toThrow('Concurrency limit must be a positive number.');
     });
 
     it('should throw an error if concurrency limit is negative', () => {
-      expect(() => new PromisePool(-1)).toThrow("Concurrency limit must be a positive number.");
+      expect(() => new PromisePool(-1)).toThrow('Concurrency limit must be a positive number.');
     });
 
     it('should initialize with correct default values', () => {
@@ -57,7 +57,7 @@ describe('PromisePool', () => {
       pool.add(task1Mock);
 
       // Task should be called after being added (due to async nature of startTaskExecution)
-      await new Promise(process.nextTick); // Allow microtask queue to process
+      await new Promise((resolve) => process.nextTick(resolve)); // Allow microtask queue to process
       expect(task1Mock).toHaveBeenCalledTimes(1);
       expect(pool.size).toBe(1);
 
@@ -111,7 +111,7 @@ describe('PromisePool', () => {
       await pool.drain();
 
       expect(maxConcurrencyReached).toBe(concurrencyLimit);
-      tasksMocks.forEach(task => expect(task).toHaveBeenCalledTimes(1));
+      tasksMocks.forEach((task) => expect(task).toHaveBeenCalledTimes(1));
       expect(pool.size).toBe(0);
       expect(pool.queueSize).toBe(0);
       expect(currentlyRunning).toBe(0);
@@ -125,7 +125,7 @@ describe('PromisePool', () => {
       const createTaskFn = (id: number, delay: number) => {
         return async () => {
           executionLog.push(`start-${id}`);
-          await new Promise(resolve => setTimeout(resolve, delay));
+          await new Promise((resolve) => setTimeout(resolve, delay));
           executionLog.push(`end-${id}`);
           taskCompletionOrder.push(id);
         };
@@ -133,9 +133,9 @@ describe('PromisePool', () => {
 
       pool.add(createTaskFn(1, 100)); // Task 1: 100ms
       pool.add(createTaskFn(2, 120)); // Task 2: 120ms
-      pool.add(createTaskFn(3, 30));  // Task 3: 30ms (queued)
-      pool.add(createTaskFn(4, 40));  // Task 4: 40ms (queued)
-      pool.add(createTaskFn(5, 20));  // Task 5: 20ms (queued)
+      pool.add(createTaskFn(3, 30)); // Task 3: 30ms (queued)
+      pool.add(createTaskFn(4, 40)); // Task 4: 40ms (queued)
+      pool.add(createTaskFn(5, 20)); // Task 5: 20ms (queued)
 
       // Expected timeline with concurrency 2:
       // 0ms: start-1, start-2
@@ -146,7 +146,7 @@ describe('PromisePool', () => {
       // 160ms (120+40): end-4 (Task 4 finishes)
       // Expected completion order: 1, 2, 3, 5, 4
 
-      await new Promise(r => setTimeout(r, 10)); // Allow first two tasks to start
+      await new Promise((r) => setTimeout(r, 10)); // Allow first two tasks to start
       expect(pool.size).toBe(2); // T1, T2 running
       expect(pool.queueSize).toBe(3); // T3, T4, T5 queued
 
@@ -203,7 +203,7 @@ describe('PromisePool', () => {
       const drainPromise = pool.drain(); // Drain starts waiting for task1
 
       // Add another task *after* drain() was called but before task1 finishes
-      await new Promise(r => setTimeout(r, 10)); // Ensure task1 has started
+      await new Promise((r) => setTimeout(r, 10)); // Ensure task1 has started
       expect(pool.size).toBe(1);
       pool.add(task2); // task2 gets queued
       expect(pool.queueSize).toBe(1);
@@ -233,7 +233,7 @@ describe('PromisePool', () => {
       expect(task1Success).toHaveBeenCalled();
       expect(task2Failure).toHaveBeenCalled();
       expect(task3Success).toHaveBeenCalled();
-      expect(consoleErrorSpy).toHaveBeenCalledWith("Task in PromisePool failed:", expect.any(Error));
+      expect(consoleErrorSpy).toHaveBeenCalledWith('Task in PromisePool failed:', expect.any(Error));
       expect(pool.size).toBe(0);
     });
 
@@ -254,7 +254,7 @@ describe('PromisePool', () => {
       expect(pool.queueSize).toBe(0);
 
       // Using non-jest.fn tasks for simplicity in this specific check
-      const longTask = () => new Promise(r => setTimeout(r, 200));
+      const longTask = () => new Promise<void>((r) => setTimeout(r, 200));
 
       pool.add(longTask); // Task 1 starts
       expect(pool.size).toBe(1);
