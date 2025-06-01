@@ -3,6 +3,7 @@ import * as cheerio from 'cheerio';
 import * as stringSimilarity from 'string-similarity';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as iconv from 'iconv-lite';
 
 import {PromisePool} from './lib/promise-pool'
 import { extractChapterNumber } from './lib/number';
@@ -18,6 +19,7 @@ interface SiteScrapingConfig {
     chapterTitleSelector: string;
     chapterContentSelector: string;
     extraTextToRemove: string[];
+    encoding?: string; // Optional: e.g., 'gbk', 'utf-8' (defaults to utf-8 if not provided)
 }
 
 // Each entry MUST be a complete SiteScrapingConfig.
@@ -38,6 +40,7 @@ const siteSpecificScrapingConfigs: Record<string, SiteScrapingConfig> = {
         chapterLinkSelector: '#list a',
         chapterTitleSelector: '.bookname h1',
         chapterContentSelector: '#content',
+        encoding: 'gbk',
         extraTextToRemove: [
             "Please support our sponsors!",
             "Read more at Another Example Site dot com",
@@ -62,18 +65,33 @@ interface ChapterInfo {
 /**
  * Fetches HTML content from a given URL.
  */
-async function getHtml(url: string): Promise<string | null> {
+async function getHtml(url: string, siteEncoding?: string): Promise<string | null> {
     try {
         console.log(`Fetching: ${url}`);
         const response = await axios.get(url, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                 'Accept-Language': 'en-US,en;q=0.9',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7' // More comprehensive Accept header
             },
-            responseType: 'arraybuffer',
-            transformResponse: [data => data],
+            responseType: 'arraybuffer', // Crucial for getting raw bytes
+            // transformResponse: [data => data], // This is default behavior for arraybuffer and is fine
         });
-        return Buffer.from(response.data).toString('utf-8'); // Assuming UTF-8, adjust if site uses GBK (then use iconv-lite)
+
+        // response.data will be an ArrayBuffer here
+        const buffer = Buffer.from(response.data); // Convert ArrayBuffer to Node.js Buffer
+
+        const encodingToUse = (siteEncoding || 'utf-8').toLowerCase();
+
+        if (encodingToUse !== 'utf-8' && iconv.encodingExists(encodingToUse)) {
+            console.log(`Decoding with: ${encodingToUse}`);
+            return iconv.decode(buffer, encodingToUse);
+        } else {
+            if (encodingToUse !== 'utf-8' && !iconv.encodingExists(encodingToUse)) {
+                console.warn(`Encoding '${encodingToUse}' not supported by iconv-lite. Falling back to UTF-8 decoding for ${url}.`);
+            }
+            return buffer.toString('utf-8'); // Default to UTF-8
+        }
     } catch (error: unknown) {
         if (axios.isAxiosError(error)) {
             console.error(`Axios error fetching ${url}: ${error.message}`);
@@ -121,9 +139,10 @@ function getChapterLinksOnPage(html: string, currentBaseUrl: string, chapterLink
  */
 async function scrapeChapterContent(
     url: string,
-    config: Pick<SiteScrapingConfig, 'chapterTitleSelector' | 'chapterContentSelector' | 'extraTextToRemove'>
+    config: Pick<SiteScrapingConfig, 'chapterTitleSelector' | 'chapterContentSelector' | 'extraTextToRemove'>,
+    siteEncoding?: string
 ): Promise<{ title: string; content: string } | null> {
-    const html = await getHtml(url);
+    const html = await getHtml(url, siteEncoding);
     if (!html) return null;
 
     const $ = cheerio.load(html);
@@ -300,7 +319,7 @@ async function processNovelSource(source_identifier: string, source: SingleSerie
     }
     console.log(`Using specific config for hostname: ${hostname}`);
 
-    const mainHtml = await getHtml(source.sourceUrl);
+    const mainHtml = await getHtml(source.sourceUrl, currentScrapingConfig?.encoding);
     if (!mainHtml) {
         console.error(`Failed to fetch main chapter list for ${source_identifier}. Skipping.`);
         return;
@@ -341,8 +360,8 @@ async function processNovelSource(source_identifier: string, source: SingleSerie
         const chapterContent = await scrapeChapterContent(chapterInfo.url, {
             chapterTitleSelector: currentScrapingConfig.chapterTitleSelector,
             chapterContentSelector: currentScrapingConfig.chapterContentSelector,
-            extraTextToRemove: currentScrapingConfig.extraTextToRemove
-        });
+            extraTextToRemove: currentScrapingConfig.extraTextToRemove,
+        }, currentScrapingConfig.encoding); // Pass encoding here
         if (chapterContent) {
             chapterInfo.pageTitle = chapterContent.title; // Update with actual title from page
             saveChapterToFile(chapterInfo, chapterContent, source_identifier, i + 1);
