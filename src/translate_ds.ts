@@ -409,7 +409,7 @@ async function processSeries(
     let filesAddedToPoolForThisSeries = 0;
     for (const file of inputFiles) {
         const inputPath = path.join(inputFolder, file);
-        const outputFileName = file.replace('.txt', '.translated.txt');
+        const outputFileName = file.replace('.txt', '.translated.md');
         const outputPath = path.join(outputFolder, outputFileName);
 
         // Filter by chapter range
