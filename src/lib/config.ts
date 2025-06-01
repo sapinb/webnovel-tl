@@ -12,6 +12,7 @@ export const MODEL_NAME = process.env.MODEL_NAME || 'hf.co/unsloth/gemma-3-27b-i
 // 📁 Base folder for all series
 export const RAW_DL_DIR = path.resolve('outputs', 'raw');
 export const TL_DIR = path.resolve('outputs', 'en');
+export const TL_DIR_OLLAMA = path.resolve('outputs', 'en_local'); // Specific for local Ollama translations
 export const SERIES_CONFIG_FILE = path.resolve('series-config.yaml'); // Path to your YAML config file
 
 // This will hold the loaded configurations
