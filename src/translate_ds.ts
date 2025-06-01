@@ -18,6 +18,10 @@ const TRANSLATION_CONCURRENCY = parseInt(process.env.TRANSLATION_CONCURRENCY || 
 // Dry run mode: if true, no API calls or file writes will occur.
 const DRY_RUN_TRANSLATION = process.env.DRY_RUN_TRANSLATION === 'true';
 
+// Thresholds for output size warning
+const OUTPUT_SIZE_THRESHOLD_FACTOR = 0.2; // If output is less than 20% of input
+const MIN_INPUT_SIZE_FOR_WARNING = 100; // Bytes, for the input to be considered substantial enough for this warning
+
 async function listTextFiles(dir: string): Promise<string[]> {
     try {
         const files = await fs.readdir(dir);
@@ -295,14 +299,9 @@ async function createTranslationTask(
 
     // Handle empty input files
     if (!chineseText.trim()) {
-        console.warn(`[${identifier}] ⚠️ Content of ${file} is empty.`);
-        if (DRY_RUN_TRANSLATION) {
-            console.log(`[${identifier}] [DRY RUN] Would create empty placeholder file at: ${outputPath}`);
-        } else {
-            console.log(`[${identifier}] Creating empty placeholder file at: ${outputPath}`);
-            await writeToFile(outputPath, "");
-            console.log(`[${identifier}] 💾 Saved empty placeholder: ${outputPath}`);
-        }
+        console.error(`[${identifier}] ❌ Content of ${file} is empty. Skipping translation and file creation.`);
+        // Do not create any file if input is empty, allowing a rerun to potentially pick it up
+        // if the file was, for example, temporarily empty during a previous run.
         return;
     }
 
@@ -320,22 +319,27 @@ async function createTranslationTask(
         const fullResponse = await translateChapterWithRetry(chineseText, glossary, customInstructions);
         const trimmed = extractTranslation(fullResponse);
 
-        if (trimmed) {
-            await writeToFile(outputPath, trimmed);
-            console.log(`[${identifier}] 💾 Saved: ${outputPath}`);
-        } else {
-            console.warn(`[${identifier}] ⚠️ Translation for ${file} resulted in empty output after trimming. Saving empty placeholder.`);
-            await writeToFile(outputPath, ""); // Save empty file as placeholder
-            console.log(`[${identifier}] 💾 Saved placeholder (empty translation): ${outputPath}`);
+        if (!trimmed) {
+            console.error(`[${identifier}] ❌ Translation for ${file} resulted in empty output after trimming. Skipping file creation.`);
+            return;
         }
+
+        // Size check
+        const inputSize = Buffer.from(chineseText).length;
+        const outputSize = Buffer.from(trimmed).length;
+
+        if (outputSize < inputSize * OUTPUT_SIZE_THRESHOLD_FACTOR && inputSize > MIN_INPUT_SIZE_FOR_WARNING) {
+            console.warn(`[${identifier}] ⚠️ Translation output for ${file} (${outputSize} bytes) is significantly smaller than input (${inputSize} bytes) (threshold: <${OUTPUT_SIZE_THRESHOLD_FACTOR * 100}% of input for inputs >${MIN_INPUT_SIZE_FOR_WARNING} bytes). Please review manually. File will still be saved.`);
+        }
+
+        await writeToFile(outputPath, trimmed);
+        console.log(`[${identifier}] 💾 Saved: ${outputPath}`);
+
     } catch (error: any) {
-        console.error(`[${identifier}] ❌ Failed to translate ${file} after multiple retries: ${error.message}`);
-        try {
-            await writeToFile(outputPath, `Error: Translation failed for ${file}. ${error.message}`);
-            console.log(`[${identifier}] 💾 Saved error placeholder: ${outputPath}`);
-        } catch (writeError: any) {
-            console.error(`[${identifier}] ❌ Could not write error placeholder for ${outputPath} after error: ${writeError.message}`);
-        }
+        // If translateChapterWithRetry throws, it means all retries failed.
+        // We log the error but do NOT save any placeholder file.
+        // This allows a future run to attempt translation again.
+        console.error(`[${identifier}] ❌ Failed to translate or save ${file} after multiple retries: ${error.message}. No file created.`);
     }
 }
 
