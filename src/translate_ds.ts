@@ -231,8 +231,8 @@ async function main() {
 
         const inputSeriesFolder = path.join(RAW_DL_DIR, identifier);
         const outputSeriesFolder = path.join(TL_DIR, identifier);
-        // Glossary and customInstructions can be undefined if not present in config
-        const { glossary, customInstructions } = seriesConfigurations[identifier];
+        const seriesConfig = seriesConfigurations[identifier];
+        const { glossary, customInstructions, translateChapterMin, translateChapterMax } = seriesConfig;
 
         await fs.mkdir(outputSeriesFolder, { recursive: true });
 
@@ -254,21 +254,30 @@ async function main() {
             const outputFileName = file.replace('.txt', '.translated.txt');
             const outputPath = path.join(outputSeriesFolder, outputFileName);
 
-            // Check for translateMinChapter
-            const seriesConfig = seriesConfigurations[identifier];
-            const translateChapterMin = seriesConfig.translateChapterMin;
-
-            if (translateChapterMin !== undefined && translateChapterMin !== null) {
+            // Check for translateChapterMin and translateChapterMax
+            if (translateChapterMin !== undefined || translateChapterMax !== undefined) {
                 // Try to extract chapter number from filename, e.g., "0001 - Title.txt"
                 const match = file.match(/^(\d{4})\s*-/); // Matches "NNNN - "
-                if (match && match[1]) {
-                    const chapterNumberFromFile = parseInt(match[1], 10);
-                    if (!isNaN(chapterNumberFromFile) && chapterNumberFromFile < translateChapterMin) {
-                        console.log(`\n⏭️  Skipping chapter ${file} (Ch. ${chapterNumberFromFile}) for series '${identifier}'. It is below the configured minimum of ${translateChapterMin}.`);
-                        continue; // Skip this file
-                    }
+                if (!match || !match[1]) {
+                    console.log(`\n⏭️  Skipping chapter ${file} for series '${identifier}'. Cannot parse chapter number, and chapter range (min/max) is specified.`);
+                    continue; // Skip this file if chapter number cannot be parsed and range is active
                 }
-                // If the filename doesn't have a 4-digit prefix, it won't be skipped by this specific logic.
+
+                // At this point, match and match[1] are valid
+                    const chapterNumberFromFile = parseInt(match[1], 10);
+                if (!isNaN(chapterNumberFromFile)) { // This check is somewhat redundant now due to the above, but good for safety
+                        if (translateChapterMin !== undefined && chapterNumberFromFile < translateChapterMin) {
+                            console.log(`\n⏭️  Skipping chapter ${file} (Ch. ${chapterNumberFromFile}) for series '${identifier}'. It is below the configured minimum of ${translateChapterMin}.`);
+                            continue; // Skip this file
+                        }
+                        if (translateChapterMax !== undefined && chapterNumberFromFile > translateChapterMax) {
+                            console.log(`\n⏭️  Skipping chapter ${file} (Ch. ${chapterNumberFromFile}) for series '${identifier}'. It is above the configured maximum of ${translateChapterMax}.`);
+                            continue; // Skip this file
+                        }
+                    }
+                // No explicit 'else' needed here for !isNaN, as the earlier check for !match handles unparsable numbers.
+                // If parseInt results in NaN for some reason despite the regex, it would fall through,
+                // but the regex `\d{4}` should prevent that.
             }
 
             try {
