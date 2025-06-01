@@ -6,6 +6,7 @@ import readline from 'readline';
 import { RAW_DL_DIR, getOrLoadSeriesConfig, TL_DIR, SERIES_CONFIG_FILE } from './lib/config';
 import { PromisePool } from './lib/promise-pool';
 
+import type { SeriesConfigurations, SingleSeriesConfig } from './lib/schema';
 // DeepSeek API Configuration
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
 const DEEPSEEK_MODEL_NAME = 'deepseek-chat'; // Or any other specific model you want to use, e.g., 'deepseek-coder' for code-related tasks
@@ -200,10 +201,10 @@ Translate the following Chinese web novel chapter while adhering to the above st
     return finalOutput;
 }
 
-async function main() {
+async function initializeEnvironment(): Promise<void> {
     if (!API_KEY) {
         console.error("❌ APIKEY_DEEPSEEK environment variable is not set. Please set it before running the script.");
-        process.exit(1);
+        throw new Error("APIKEY_DEEPSEEK environment variable is not set.");
     }
     console.log("✅ DeepSeek API Key found.");
 
@@ -211,132 +212,197 @@ async function main() {
 
     const seriesConfigurations = await getOrLoadSeriesConfig();
     const seriesIdentifiers = await fs.readdir(RAW_DL_DIR, { withFileTypes: true })
+        .then(dirents => dirents
+            .filter(dirent => dirent.isDirectory())
+            .map(dirent => dirent.name)
+        )
+        .catch(err => {
+            console.error(`❌ Could not read series identifiers from ${RAW_DL_DIR}: ${err.message}`);
+            return []; // Return empty array on error to prevent crash, main logic will handle it
+        });
+
+    if (seriesIdentifiers.length === 0 && Object.keys(seriesConfigurations).length > 0) {
+        console.log(`No series subdirectories found in ${RAW_DL_DIR}, though configurations exist. Ensure raw files are downloaded and organized into subdirectories named by series identifier.`);
+    } else if (seriesIdentifiers.length === 0) {
+        console.log(`No series subdirectories found in ${RAW_DL_DIR}. Exiting.`);
+    }
+}
+
+interface SeriesProcessingInfo {
+    identifier: string;
+    config: SingleSeriesConfig;
+    inputFolder: string;
+    outputFolder: string;
+}
+
+async function getSeriesToProcess(
+    seriesConfigurations: SeriesConfigurations
+): Promise<SeriesProcessingInfo[]> {
+    const availableSeriesIdentifiers = await fs.readdir(RAW_DL_DIR, { withFileTypes: true })
         .then(dirents => dirents.filter(dirent => dirent.isDirectory()).map(dirent => dirent.name))
         .catch(err => {
             console.error(`❌ Could not read series identifiers from ${RAW_DL_DIR}: ${err.message}`);
             return [];
         });
 
-    if (seriesIdentifiers.length === 0) {
-        console.log(`No series found in ${RAW_DL_DIR}. Exiting.`);
+    if (availableSeriesIdentifiers.length === 0) {
+        return [];
+    }
+
+    const seriesToProcess: SeriesProcessingInfo[] = [];
+
+    for (const identifier of availableSeriesIdentifiers) {
+        if (!seriesConfigurations[identifier]) {
+            console.warn(`\n⏭️ Skipping series '${identifier}': No configuration found in '${SERIES_CONFIG_FILE}'.`);
+            continue;
+        }
+
+        const seriesConfig = seriesConfigurations[identifier];
+        if (seriesConfig.skipTranslation) {
+            console.warn(`\n⏭️ Skipping series '${identifier}': Marked as skipTranslation in config.`);
+            continue;
+        }
+
+        seriesToProcess.push({
+            identifier,
+            config: seriesConfig,
+            inputFolder: path.join(RAW_DL_DIR, identifier),
+            outputFolder: path.join(TL_DIR, identifier),
+        });
+    }
+    return seriesToProcess;
+}
+
+async function createTranslationTask(
+    identifier: string,
+    file: string,
+    inputPath: string,
+    outputPath: string,
+    glossary?: string,
+    customInstructions?: string
+): Promise<void> {
+    console.log(`[${identifier}] 📖 Reading: ${file}`);
+    const chineseText = await readFileContent(inputPath);
+
+    if (!chineseText.trim()) {
+        console.warn(`[${identifier}] ⚠️ Skipping empty file: ${file}. Creating empty placeholder.`);
+        await writeToFile(outputPath, "");
+        return;
+    }
+
+    console.log(`[${identifier}] 🌐 Translating: ${file} using DeepSeek API...`);
+    try {
+        const fullResponse = await translateChapterWithRetry(chineseText, glossary, customInstructions);
+        const trimmed = extractTranslation(fullResponse);
+
+        if (trimmed) {
+            await writeToFile(outputPath, trimmed);
+            console.log(`[${identifier}] 💾 Saved: ${outputPath}`);
+        } else {
+            console.warn(`[${identifier}] ⚠️ Translation for ${file} resulted in empty output after trimming. Saving placeholder.`);
+            await writeToFile(outputPath, ""); // Save empty file as placeholder
+            console.log(`[${identifier}] 💾 Saved placeholder (empty translation): ${outputPath}`);
+        }
+    } catch (error: any) {
+        console.error(`[${identifier}] ❌ Failed to translate ${file} after multiple retries: ${error.message}`);
+        try {
+            await writeToFile(outputPath, `Error: Translation failed for ${file}. ${error.message}`);
+            console.log(`[${identifier}] 💾 Saved error placeholder: ${outputPath}`);
+        } catch (writeError: any) {
+            console.error(`[${identifier}] ❌ Could not write error placeholder for ${outputPath} after error: ${writeError.message}`);
+        }
+    }
+}
+
+async function processSeries(
+    seriesInfo: SeriesProcessingInfo,
+    pool: PromisePool
+): Promise<number> {
+    const { identifier, config, inputFolder, outputFolder } = seriesInfo;
+    const { glossary, customInstructions, translateChapterMin, translateChapterMax } = config;
+
+    await fs.mkdir(outputFolder, { recursive: true });
+
+    console.log(`\n--- Processing series: ${identifier} ---`);
+    console.log(`Input: ${inputFolder}`);
+    console.log(`Output: ${outputFolder}`);
+    if (glossary) console.log(`Glossary: Loaded for this series.`);
+    if (customInstructions) console.log(`Custom Instructions: Loaded for this series.`);
+
+    const inputFiles = await listTextFiles(inputFolder);
+    if (inputFiles.length === 0) {
+        console.log(`No .txt files found in ${inputFolder}.`);
+        return 0;
+    }
+
+    let filesAddedToPoolForThisSeries = 0;
+    for (const file of inputFiles) {
+        const inputPath = path.join(inputFolder, file);
+        const outputFileName = file.replace('.txt', '.translated.txt');
+        const outputPath = path.join(outputFolder, outputFileName);
+
+        // Filter by chapter range
+        if (translateChapterMin !== undefined || translateChapterMax !== undefined) {
+            const match = file.match(/^(\d{4})\s*-/);
+            if (match && match[1]) {
+                const chapterNumberFromFile = parseInt(match[1], 10);
+                if (!isNaN(chapterNumberFromFile)) {
+                    if ((translateChapterMin !== undefined && chapterNumberFromFile < translateChapterMin) ||
+                        (translateChapterMax !== undefined && chapterNumberFromFile > translateChapterMax)) {
+                        // console.log(`\n[${identifier}] ⏭️ Skipping chapter ${file} (Ch. ${chapterNumberFromFile}) due to range.`);
+                        continue;
+                    }
+                }
+            } else {
+                console.log(`\n[${identifier}] ⏭️ Skipping chapter ${file}. Cannot parse chapter number for range check (min/max).`);
+                continue;
+            }
+        }
+
+        // Filter if already translated
+        try {
+            await fs.access(outputPath);
+            // console.log(`[${identifier}] ✅ Skipping already translated: ${file} (output file exists)`);
+            continue;
+        } catch (error) {
+            // File does not exist, proceed
+        }
+
+        filesAddedToPoolForThisSeries++;
+        pool.add(() => createTranslationTask(identifier, file, inputPath, outputPath, glossary, customInstructions));
+    }
+
+    if (filesAddedToPoolForThisSeries > 0) {
+        console.log(`\n[${identifier}] Added ${filesAddedToPoolForThisSeries} chapters to the global translation pool.`);
+    } else {
+        console.log(`\n[${identifier}] No new chapters to translate in this series.`);
+    }
+    console.log(`--- Finished scanning series: ${identifier} ---`);
+    return filesAddedToPoolForThisSeries;
+}
+
+async function main() {
+    try {
+        await initializeEnvironment();
+    } catch (error: any) {
+        console.error(`❌ Initialization failed: ${error.message}`);
+        process.exit(1);
+    }
+
+    const seriesConfigurations = await getOrLoadSeriesConfig();
+    const seriesToProcess = await getSeriesToProcess(seriesConfigurations);
+
+    if (seriesToProcess.length === 0) {
+        console.log("No series to process. Exiting.");
         return;
     }
 
     const pool = new PromisePool(TRANSLATION_CONCURRENCY);
     let totalFilesAddedToPool = 0;
 
-    for (const identifier of seriesIdentifiers) {
-        if (!seriesConfigurations[identifier]) {
-            console.warn(`\n⏭️ Skipping series '${identifier}': No configuration found in '${SERIES_CONFIG_FILE}'.`);
-            continue;
-        }
-
-        if (seriesConfigurations[identifier].skipTranslation) {
-            console.warn(`\n⏭️ Skipping series '${identifier}': Marked as skipTranslation in config.`);
-            continue;
-        }
-
-        const inputSeriesFolder = path.join(RAW_DL_DIR, identifier);
-        const outputSeriesFolder = path.join(TL_DIR, identifier);
-        const seriesConfig = seriesConfigurations[identifier];
-        const { glossary, customInstructions, translateChapterMin, translateChapterMax } = seriesConfig;
-
-        await fs.mkdir(outputSeriesFolder, { recursive: true });
-
-        console.log(`\n--- Processing series: ${identifier} ---`);
-        console.log(`Input: ${inputSeriesFolder}`);
-        console.log(`Output: ${outputSeriesFolder}`);
-        if(glossary) console.log(`Glossary: Loaded for this series.`);
-        if(customInstructions) console.log(`Custom Instructions: Loaded for this series.`);
-
-
-        const inputFiles = await listTextFiles(inputSeriesFolder);
-        if (inputFiles.length === 0) {
-            console.log(`No .txt files found in ${inputSeriesFolder}.`);
-            continue;
-        }
-
-        let filesAddedToPoolForThisSeries = 0;
-
-        for (const file of inputFiles) {
-            const inputPath = path.join(inputSeriesFolder, file);
-            const outputFileName = file.replace('.txt', '.translated.txt');
-            const outputPath = path.join(outputSeriesFolder, outputFileName);
-
-            // Check for translateChapterMin and translateChapterMax
-            if (translateChapterMin !== undefined || translateChapterMax !== undefined) {
-                // Try to extract chapter number from filename, e.g., "0001 - Title.txt"
-                const match = file.match(/^(\d{4})\s*-/); // Matches "NNNN - "
-                if (match && match[1]) {
-                    const chapterNumberFromFile = parseInt(match[1], 10);
-                    if (!isNaN(chapterNumberFromFile)) {
-                        if (translateChapterMin !== undefined && chapterNumberFromFile < translateChapterMin) {
-                            // console.log(`\n[${identifier}] ⏭️ Skipping chapter ${file} (Ch. ${chapterNumberFromFile}). Below min ${translateChapterMin}.`);
-                            continue; // Skip this file
-                        }
-                        if (translateChapterMax !== undefined && chapterNumberFromFile > translateChapterMax) {
-                            // console.log(`\n[${identifier}] ⏭️ Skipping chapter ${file} (Ch. ${chapterNumberFromFile}). Above max ${translateChapterMax}.`);
-                            continue; // Skip this file
-                        }
-                    }
-                } else {
-                    console.log(`\n[${identifier}] ⏭️ Skipping chapter ${file}. Cannot parse chapter number for range check (min/max).`);
-                    continue; 
-                }
-            }
-
-            try {
-                await fs.access(outputPath);
-                // console.log(`[${identifier}] ✅ Skipping already translated: ${file} (output file exists)`);
-                continue;
-            } catch (error) {
-                // File does not exist, proceed with translation
-            }
-
-            filesAddedToPoolForThisSeries++;
-            totalFilesAddedToPool++;
-            pool.add(async () => {
-                console.log(`[${identifier}] 📖 Reading: ${file}`);
-                const chineseText = await readFileContent(inputPath);
-
-                if (!chineseText.trim()) {
-                    console.warn(`[${identifier}] ⚠️ Skipping empty file: ${file}. Creating empty placeholder.`);
-                    await writeToFile(outputPath, ""); 
-                    return;
-                }
-
-                console.log(`[${identifier}] 🌐 Translating: ${file} using DeepSeek API...`);
-                try {
-                    const fullResponse = await translateChapterWithRetry(chineseText, glossary, customInstructions);
-                    const trimmed = extractTranslation(fullResponse);
-
-                    if (trimmed) {
-                        // console.log(`[${identifier}] 📤 Translation for ${file} finished. Saving output.`);
-                        await writeToFile(outputPath, trimmed);
-                        console.log(`[${identifier}] 💾 Saved: ${outputPath}`);
-                    } else {
-                        console.warn(`[${identifier}] ⚠️ Translation for ${file} resulted in empty output after trimming. Saving placeholder.`);
-                        await writeToFile(outputPath, ""); // Save empty file as placeholder
-                        console.log(`[${identifier}] 💾 Saved placeholder (empty translation): ${outputPath}`);
-                    }
-
-                } catch (error: any) {
-                    console.error(`[${identifier}] ❌ Failed to translate ${file} after multiple retries: ${error.message}`);
-                    try {
-                        await writeToFile(outputPath, `Error: Translation failed for ${file}. ${error.message}`);
-                        console.log(`[${identifier}] 💾 Saved error placeholder: ${outputPath}`);
-                    } catch (writeError: any) {
-                        console.error(`[${identifier}] ❌ Could not write error placeholder for ${outputPath} after error: ${writeError.message}`);
-                    }
-                }
-            });
-        }
-        if (filesAddedToPoolForThisSeries > 0) {
-            console.log(`\n[${identifier}] Added ${filesAddedToPoolForThisSeries} chapters to the global translation pool.`);
-        } else {
-            console.log(`\n[${identifier}] No new chapters to translate in this series.`);
-        }
-        console.log(`--- Finished processing series: ${identifier} ---`);
+    for (const seriesInfo of seriesToProcess) {
+        const count = await processSeries(seriesInfo, pool);
+        totalFilesAddedToPool += count;
     }
 
     if (totalFilesAddedToPool > 0) {
@@ -349,6 +415,6 @@ async function main() {
 }
 
 main().catch(err => {
-    console.error("❌ Unhandled error in main:", err);
+    console.error("❌ Unhandled error in main execution:", err);
     process.exit(1);
 });
