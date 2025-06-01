@@ -49,7 +49,7 @@ function extractTranslation(content: string): string {
 
 export async function translateChapterWithRetry(
     chineseText: string,
-    glossary?: string, // Glossary is now optional
+    glossary?: string,
     customInstructions?: string,
     maxAttempts = 3
 ): Promise<string> {
@@ -70,7 +70,7 @@ export async function translateChapterWithRetry(
 
 async function translateChapter(
     chineseText: string,
-    glossary?: string, // Glossary is now optional
+    glossary?: string,
     customInstructions?: string
 ): Promise<string> {
     if (!API_KEY) {
@@ -167,14 +167,13 @@ Translate the following Chinese web novel chapter while adhering to the above st
                 try {
                     const data = JSON.parse(jsonData);
                     const token = data.choices?.[0]?.delta?.content || '';
-                    // process.stdout.write(token); // Removed to prevent interleaved output
                     finalOutput += token;
                 } catch (err: any) {
                     // It's possible to receive non-JSON data or metadata in the stream, log and ignore
                     console.warn('\n⚠️ Non-JSON line or parse error in stream:', line, err.message);
                 }
             } else {
-                 // Log unexpected lines that are not part of SSE format
+                 // Log unexpected lines that are not part of the Server-Sent Events (SSE) format
                  console.warn('\n⚠️ Unexpected line in stream:', line);
             }
         }
@@ -201,8 +200,6 @@ Translate the following Chinese web novel chapter while adhering to the above st
 
     if (finalOutput.trim() === '') {
         console.warn("\n⚠️ Translation result is empty.");
-        // Optionally throw an error here if an empty translation is considered a failure
-        // throw new Error("Translation result is empty.");
     }
     
     return finalOutput;
@@ -299,8 +296,8 @@ async function createTranslationTask(
 
     // Handle empty input files
     if (!chineseText.trim()) {
-        console.error(`[${identifier}] ❌ Content of ${file} is empty. Skipping translation and file creation.`);
-        // Do not create any file if input is empty, allowing a rerun to potentially pick it up
+        console.error(`[${identifier}] ❌ Content of ${file} is empty. Skipping translation. No output file will be created.`);
+        // Do not create an output file if input is empty. This allows a rerun to pick it up
         // if the file was, for example, temporarily empty during a previous run.
         return;
     }
@@ -336,8 +333,7 @@ async function createTranslationTask(
         console.log(`[${identifier}] 💾 Saved: ${outputPath}`);
 
     } catch (error: any) {
-        // If translateChapterWithRetry throws, it means all retries failed.
-        // We log the error but do NOT save any placeholder file.
+        // If translateChapterWithRetry throws, all retries failed. Log the error. No placeholder file is saved.
         // This allows a future run to attempt translation again.
         console.error(`[${identifier}] ❌ Failed to translate or save ${file} after multiple retries: ${error.message}. No file created.`);
     }
@@ -377,8 +373,7 @@ async function processSeries(
                 const chapterNumberFromFile = parseInt(match[1], 10);
                 if (!isNaN(chapterNumberFromFile)) {
                     if ((translateChapterMin !== undefined && chapterNumberFromFile < translateChapterMin) ||
-                        (translateChapterMax !== undefined && chapterNumberFromFile > translateChapterMax)) {
-                        // console.log(`\n[${identifier}] ⏭️ Skipping chapter ${file} (Ch. ${chapterNumberFromFile}) due to range.`);
+                        (translateChapterMax !== undefined && chapterNumberFromFile > translateChapterMax)) {                        
                         continue;
                     }
                 }
