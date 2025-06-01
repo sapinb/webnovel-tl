@@ -2,3 +2,4 @@ node_modules
 outputs
 .env
 series-config.yaml
+tmp
