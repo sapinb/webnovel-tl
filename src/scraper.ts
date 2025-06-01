@@ -9,25 +9,44 @@ import { extractChapterNumber } from './lib/number';
 import { getOrLoadSeriesConfig, RAW_DL_DIR } from './lib/config';
 import { SingleSeriesConfig } from './lib/schema';
 
-// --- Configuration ---
-// const baseOutputDir = path.join('outputs', 'raw'); // Base directory to save novel folders
-
-// --- CSS Selectors (YOU MIGHT NEED TO UPDATE THESE PER SITE) ---
-// These are generic and might need adjustment for different sources if they vary significantly.
-// You might consider moving these into the SourceConfig if they change per novel.
-const chapterLinkSelector = '.info li a';   // Selector for chapter links on the main page
-const chapterTitleSelector = '#neirong h1'; // Selector for the chapter title on a chapter page
-const chapterContentSelector = '#txt';      // Selector for the chapter content on a chapter page
-// --- End Configuration ---
-
 // Threshold for string similarity (0.0 to 1.0). 0.8 means 80% similar.
 const SIMILARITY_THRESHOLD = 0.9;
 
-const extraTextToRemove = [
-    "搜书名找不到,可以试试搜作者哦,也许只是改名了!",
-    "一秒记住【笔趣阁小说网】biquge345.com，更新快，无弹窗！",
-    "本站采用Cookie技术来保存您的「阅读记录」和「书架」,所以清除浏览器Cookie数据丶重装浏览器之类的操作会让您的阅读进度消失哦,建议可以偶尔截图保存书架,以防找不到正在阅读的小说!",
-]
+// --- Site-Specific Scraping Configuration ---
+interface SiteScrapingConfig {
+    chapterLinkSelector: string;
+    chapterTitleSelector: string;
+    chapterContentSelector: string;
+    extraTextToRemove: string[];
+}
+
+// Each entry MUST be a complete SiteScrapingConfig.
+// There is no default fallback anymore.
+const siteSpecificScrapingConfigs: Record<string, SiteScrapingConfig> = {
+    "www.biquge345.com": { // Hostname as key
+        chapterLinkSelector: '.info li a',
+        chapterTitleSelector: '#neirong h1',
+        chapterContentSelector: '#txt',
+        extraTextToRemove: [
+            "搜书名找不到,可以试试搜作者哦,也许只是改名了!",
+            "一秒记住【笔趣阁小说网】biquge345.com，更新快，无弹窗！",
+            "本站采用Cookie技术来保存您的「阅读记录」和「书架」,所以清除浏览器Cookie数据丶重装浏览器之类的操作会让您的阅读进度消失哦,建议可以偶尔截图保存书架,以防找不到正在阅读的小说!",
+            // Add any other biquge345 specific removal patterns here
+        ]
+    },
+    "www.biquge900.com": {
+        chapterLinkSelector: '#list a',
+        chapterTitleSelector: '.bookname h1',
+        chapterContentSelector: '#content',
+        extraTextToRemove: [
+            "Please support our sponsors!",
+            "Read more at Another Example Site dot com",
+            // Add any other specific removal patterns for this site
+        ]
+    }
+    // Add more site-specific configurations here
+    // e.g., "m.another-site.com": { ... }
+};
 
 interface ChapterInfo {
     pageTitle: string; // The title as it appears on the chapter page
@@ -70,11 +89,11 @@ async function getHtml(url: string): Promise<string | null> {
 /**
  * Parses the main page to get all chapter links and their extracted numbers.
  */
-function getChapterLinksOnPage(html: string, currentBaseUrl: string): ChapterInfo[] {
+function getChapterLinksOnPage(html: string, currentBaseUrl: string, chapterLinkSelector: string): ChapterInfo[] {
     const $ = cheerio.load(html);
     const chapters: ChapterInfo[] = [];
 
-    $(chapterLinkSelector).each((_index, element) => {
+    $(chapterLinkSelector).each((_index, element) => { // Use the passed selector
         const linkElement = $(element);
         const originalLinkText = linkElement.text().trim();
         let relativeUrl = linkElement.attr('href');
@@ -100,14 +119,19 @@ function getChapterLinksOnPage(html: string, currentBaseUrl: string): ChapterInf
 /**
  * Scrapes a single chapter page for its title and content.
  */
-async function scrapeChapterContent(url: string): Promise<{ title: string; content: string } | null> {
+async function scrapeChapterContent(
+    url: string,
+    config: Pick<SiteScrapingConfig, 'chapterTitleSelector' | 'chapterContentSelector' | 'extraTextToRemove'>
+): Promise<{ title: string; content: string } | null> {
     const html = await getHtml(url);
     if (!html) return null;
 
     const $ = cheerio.load(html);
 
-    const title = $(chapterTitleSelector).text().trim();
-    const contentHtml = $(chapterContentSelector)
+    const { chapterTitleSelector, chapterContentSelector, extraTextToRemove: siteExtraTextToRemove } = config;
+
+    const title = $(chapterTitleSelector).text().trim(); // Use passed selector
+    const contentHtml = $(chapterContentSelector) // Use passed selector
         .clone()
         .find('a, script, style, div[align="center"], .adsbygoogle') // More elements to remove
         .remove()
@@ -128,7 +152,7 @@ async function scrapeChapterContent(url: string): Promise<{ title: string; conte
     
     const lines = textContent.split('\n');
     const filteredLines: string[] = [];
-    const trimmedPatternsToRemove = extraTextToRemove.map(p => p.trim()).filter(p => p.length > 0); // Trim patterns and remove empty ones
+    const trimmedPatternsToRemove = siteExtraTextToRemove.map(p => p.trim()).filter(p => p.length > 0); // Use passed extraTextToRemove
 
     for (const line of lines) {
         const trimmedLine = line.trim();
@@ -263,7 +287,18 @@ async function processNovelSource(source_identifier: string, source: SingleSerie
     console.log(`\n[Processing Source ${index + 1}/${total}: ${source_identifier}]`);
     console.log(`Listing URL: ${source.sourceUrl}`);
 
-    const effectiveBaseUrl = new URL(source.sourceUrl).origin;
+    const sourceUrlObj = new URL(source.sourceUrl);
+    const effectiveBaseUrl = sourceUrlObj.origin;
+    const hostname = sourceUrlObj.hostname;
+
+    // Get the scraping configuration for this site
+    const currentScrapingConfig = siteSpecificScrapingConfigs[hostname];
+
+    if (!currentScrapingConfig) {
+        console.warn(`⚠️ No scraping configuration found for hostname: '${hostname}' (source: ${source_identifier}). Skipping this source.`);
+        return;
+    }
+    console.log(`Using specific config for hostname: ${hostname}`);
 
     const mainHtml = await getHtml(source.sourceUrl);
     if (!mainHtml) {
@@ -271,10 +306,10 @@ async function processNovelSource(source_identifier: string, source: SingleSerie
         return;
     }
 
-    const chapterInfos = getChapterLinksOnPage(mainHtml, effectiveBaseUrl);
+    const chapterInfos = getChapterLinksOnPage(mainHtml, effectiveBaseUrl, currentScrapingConfig.chapterLinkSelector);
 
     if (chapterInfos.length === 0) {
-        console.warn(`No chapter links found for ${source_identifier} with selector "${chapterLinkSelector}". Check selector or page structure.`);
+        console.warn(`No chapter links found for ${source_identifier} with selector "${currentScrapingConfig.chapterLinkSelector}". Check selector or page structure.`);
         return;
     }
     
@@ -303,7 +338,11 @@ async function processNovelSource(source_identifier: string, source: SingleSerie
             continue;
         }
 
-        const chapterContent = await scrapeChapterContent(chapterInfo.url);
+        const chapterContent = await scrapeChapterContent(chapterInfo.url, {
+            chapterTitleSelector: currentScrapingConfig.chapterTitleSelector,
+            chapterContentSelector: currentScrapingConfig.chapterContentSelector,
+            extraTextToRemove: currentScrapingConfig.extraTextToRemove
+        });
         if (chapterContent) {
             chapterInfo.pageTitle = chapterContent.title; // Update with actual title from page
             saveChapterToFile(chapterInfo, chapterContent, source_identifier, i + 1);
