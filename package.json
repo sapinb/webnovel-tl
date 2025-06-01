@@ -5,7 +5,8 @@
   "scripts": {
     "test": "jest",
     "sync-raws": "ts-node src/scraper.ts",
-    "sync-tl": "ts-node src/translate.ts",
+    "translate:ollama": "ts-node src/translate.ts",
+    "translate:ds": "ts-node src/translate_ds.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"*.js\" \"*.json\""
