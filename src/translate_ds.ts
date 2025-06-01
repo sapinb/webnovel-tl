@@ -15,6 +15,9 @@ const API_KEY = process.env.APIKEY_DEEPSEEK;
 // Concurrency for translation tasks
 const TRANSLATION_CONCURRENCY = parseInt(process.env.TRANSLATION_CONCURRENCY || "3", 10);
 
+// Dry run mode: if true, no API calls or file writes will occur.
+const DRY_RUN_TRANSLATION = process.env.DRY_RUN_TRANSLATION === 'true';
+
 async function listTextFiles(dir: string): Promise<string[]> {
     try {
         const files = await fs.readdir(dir);
@@ -202,13 +205,19 @@ Translate the following Chinese web novel chapter while adhering to the above st
 }
 
 async function initializeEnvironment(): Promise<void> {
-    if (!API_KEY) {
-        console.error("❌ APIKEY_DEEPSEEK environment variable is not set. Please set it before running the script.");
-        throw new Error("APIKEY_DEEPSEEK environment variable is not set.");
+    if (DRY_RUN_TRANSLATION) {
+        console.log("💧 DRY RUN MODE ENABLED. No API calls will be made, and no files will be written.");
+    } else {
+        if (!API_KEY) {
+            console.error("❌ APIKEY_DEEPSEEK environment variable is not set. Please set it before running the script.");
+            throw new Error("APIKEY_DEEPSEEK environment variable is not set.");
+        }
+        console.log("✅ DeepSeek API Key found.");
     }
-    console.log("✅ DeepSeek API Key found.");
-
+    
     await fs.mkdir(TL_DIR, { recursive: true });
+    console.log(`✅ Output directory ${TL_DIR} ensured.`);
+
 
     const seriesConfigurations = await getOrLoadSeriesConfig();
     const seriesIdentifiers = await fs.readdir(RAW_DL_DIR, { withFileTypes: true })
@@ -284,9 +293,25 @@ async function createTranslationTask(
     console.log(`[${identifier}] 📖 Reading: ${file}`);
     const chineseText = await readFileContent(inputPath);
 
+    // Handle empty input files
     if (!chineseText.trim()) {
-        console.warn(`[${identifier}] ⚠️ Skipping empty file: ${file}. Creating empty placeholder.`);
-        await writeToFile(outputPath, "");
+        console.warn(`[${identifier}] ⚠️ Content of ${file} is empty.`);
+        if (DRY_RUN_TRANSLATION) {
+            console.log(`[${identifier}] [DRY RUN] Would create empty placeholder file at: ${outputPath}`);
+        } else {
+            console.log(`[${identifier}] Creating empty placeholder file at: ${outputPath}`);
+            await writeToFile(outputPath, "");
+            console.log(`[${identifier}] 💾 Saved empty placeholder: ${outputPath}`);
+        }
+        return;
+    }
+
+    // Dry run check for non-empty files
+    if (DRY_RUN_TRANSLATION) {
+        console.log(`[${identifier}] [DRY RUN] 🎯 Would translate: ${file}`);
+        console.log(`[${identifier}] [DRY RUN] 💾 Would save to: ${outputPath}`);
+        if (glossary) console.log(`[${identifier}] [DRY RUN] Would use glossary.`);
+        if (customInstructions) console.log(`[${identifier}] [DRY RUN] Would use custom instructions.`);
         return;
     }
 
@@ -299,7 +324,7 @@ async function createTranslationTask(
             await writeToFile(outputPath, trimmed);
             console.log(`[${identifier}] 💾 Saved: ${outputPath}`);
         } else {
-            console.warn(`[${identifier}] ⚠️ Translation for ${file} resulted in empty output after trimming. Saving placeholder.`);
+            console.warn(`[${identifier}] ⚠️ Translation for ${file} resulted in empty output after trimming. Saving empty placeholder.`);
             await writeToFile(outputPath, ""); // Save empty file as placeholder
             console.log(`[${identifier}] 💾 Saved placeholder (empty translation): ${outputPath}`);
         }
